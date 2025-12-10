@@ -20,6 +20,18 @@ declare module "obsidian" {
   }
 }
 import * as http from "http";
+import { KBManager } from "./kb-manager";
+import { validateNote, findApplicableConstraint, validateConstraintRulesSchema } from "./validation";
+import {
+  KnowledgeBase,
+  FolderConstraint,
+  ConstraintRules,
+  ApiError,
+  ConstraintViolationError,
+  ValidationResult,
+  VALIDATION_INSTRUCTIONS,
+  DEFAULT_READ_LIMIT,
+} from "./types";
 
 interface LLMBridgesSettings {
   port: number;
@@ -34,9 +46,11 @@ const DEFAULT_SETTINGS: LLMBridgesSettings = {
 export default class LLMBridgesPlugin extends Plugin {
   settings: LLMBridgesSettings;
   server: http.Server | null = null;
+  kbManager: KBManager;
 
   async onload() {
     await this.loadSettings();
+    this.kbManager = new KBManager(this.app);
 
     // Generate API key if not set
     if (!this.settings.apiKey) {
@@ -124,6 +138,14 @@ export default class LLMBridgesPlugin extends Plugin {
         await this.handleRequest(req, res);
       } catch (error) {
         console.error("LLM Bridges error:", error);
+
+        // Handle structured errors
+        if (this.isApiError(error)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error }));
+          return;
+        }
+
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(error) }));
       }
@@ -152,6 +174,15 @@ export default class LLMBridgesPlugin extends Plugin {
     new Notice(`LLM Bridges restarted on port ${this.settings.port}`);
   }
 
+  private isApiError(error: unknown): error is ApiError {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      "message" in error
+    );
+  }
+
   async handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     const url = new URL(req.url || "/", `http://127.0.0.1:${this.settings.port}`);
     const path = url.pathname;
@@ -166,33 +197,37 @@ export default class LLMBridgesPlugin extends Plugin {
       });
     }
 
-    // Route handling
+    // =========================================================================
+    // Status & Legacy Routes
+    // =========================================================================
+
     if (path === "/" && req.method === "GET") {
       return this.handleStatus(res);
     }
 
+    // Legacy vault operations (for backward compatibility)
     if (path === "/vault" && req.method === "GET") {
       return this.handleListFiles(res, url.searchParams.get("path") || "");
     }
 
     if (path === "/vault/read" && req.method === "POST") {
       const data = JSON.parse(body);
-      return this.handleReadFile(res, data.path);
+      return this.handleReadFileLegacy(res, data.path);
     }
 
     if (path === "/vault/write" && req.method === "POST") {
       const data = JSON.parse(body);
-      return this.handleWriteFile(res, data.path, data.content);
+      return this.handleWriteFileLegacy(res, data.path, data.content);
     }
 
     if (path === "/vault/append" && req.method === "POST") {
       const data = JSON.parse(body);
-      return this.handleAppendFile(res, data.path, data.content);
+      return this.handleAppendFileLegacy(res, data.path, data.content);
     }
 
     if (path === "/vault/delete" && req.method === "POST") {
       const data = JSON.parse(body);
-      return this.handleDeleteFile(res, data.path);
+      return this.handleDeleteFileLegacy(res, data.path);
     }
 
     if (path === "/search" && req.method === "POST") {
@@ -213,9 +248,76 @@ export default class LLMBridgesPlugin extends Plugin {
       return this.handleExecuteCommand(res, data.commandId);
     }
 
+    // =========================================================================
+    // Knowledge Base Routes
+    // =========================================================================
+
+    if (path === "/kb" && req.method === "GET") {
+      return this.handleListKnowledgeBases(res);
+    }
+
+    if (path === "/kb" && req.method === "POST") {
+      const data = JSON.parse(body);
+      return this.handleAddKnowledgeBase(res, data);
+    }
+
+    if (path === "/kb" && req.method === "PUT") {
+      const data = JSON.parse(body);
+      return this.handleUpdateKnowledgeBase(res, data);
+    }
+
+    if (path === "/kb/constraint" && req.method === "POST") {
+      const data = JSON.parse(body);
+      return this.handleAddFolderConstraint(res, data);
+    }
+
+    // =========================================================================
+    // Note Routes (KB-scoped with validation)
+    // =========================================================================
+
+    if (path === "/kb/notes" && req.method === "GET") {
+      const kbName = url.searchParams.get("kb");
+      const subfolder = url.searchParams.get("subfolder") || undefined;
+      return this.handleListNotes(res, kbName || "", subfolder);
+    }
+
+    if (path === "/kb/note/create" && req.method === "POST") {
+      const data = JSON.parse(body);
+      return this.handleCreateNote(res, data);
+    }
+
+    if (path === "/kb/note/read" && req.method === "POST") {
+      const data = JSON.parse(body);
+      return this.handleReadNote(res, data);
+    }
+
+    if (path === "/kb/note/update" && req.method === "POST") {
+      const data = JSON.parse(body);
+      return this.handleUpdateNote(res, data);
+    }
+
+    if (path === "/kb/note/append" && req.method === "POST") {
+      const data = JSON.parse(body);
+      return this.handleAppendNote(res, data);
+    }
+
+    if (path === "/kb/note/move" && req.method === "POST") {
+      const data = JSON.parse(body);
+      return this.handleMoveNote(res, data);
+    }
+
+    if (path === "/kb/note/delete" && req.method === "POST") {
+      const data = JSON.parse(body);
+      return this.handleDeleteNote(res, data);
+    }
+
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Not found" }));
   }
+
+  // ===========================================================================
+  // Status & Legacy Handlers
+  // ===========================================================================
 
   handleStatus(res: http.ServerResponse) {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -238,7 +340,6 @@ export default class LLMBridgesPlugin extends Plugin {
           files.push(childPath);
         } else if (child instanceof TFolder) {
           files.push(childPath + "/");
-          // Only recurse one level for directory listings
         }
       }
     };
@@ -260,7 +361,7 @@ export default class LLMBridgesPlugin extends Plugin {
     res.end(JSON.stringify({ files }));
   }
 
-  async handleReadFile(res: http.ServerResponse, filePath: string) {
+  async handleReadFileLegacy(res: http.ServerResponse, filePath: string) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
     if (!(file instanceof TFile)) {
       res.writeHead(404, { "Content-Type": "application/json" });
@@ -283,7 +384,7 @@ export default class LLMBridgesPlugin extends Plugin {
     );
   }
 
-  async handleWriteFile(
+  async handleWriteFileLegacy(
     res: http.ServerResponse,
     filePath: string,
     content: string
@@ -308,15 +409,14 @@ export default class LLMBridgesPlugin extends Plugin {
     res.end(JSON.stringify({ success: true, path: filePath }));
   }
 
-  async handleAppendFile(
+  async handleAppendFileLegacy(
     res: http.ServerResponse,
     filePath: string,
     content: string
   ) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
     if (!(file instanceof TFile)) {
-      // Create new file if doesn't exist
-      return this.handleWriteFile(res, filePath, content);
+      return this.handleWriteFileLegacy(res, filePath, content);
     }
 
     const existingContent = await this.app.vault.read(file);
@@ -330,7 +430,7 @@ export default class LLMBridgesPlugin extends Plugin {
     res.end(JSON.stringify({ success: true, path: filePath }));
   }
 
-  async handleDeleteFile(res: http.ServerResponse, filePath: string) {
+  async handleDeleteFileLegacy(res: http.ServerResponse, filePath: string) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
     if (!(file instanceof TFile)) {
       res.writeHead(404, { "Content-Type": "application/json" });
@@ -389,7 +489,7 @@ export default class LLMBridgesPlugin extends Plugin {
       return;
     }
 
-    this.handleReadFile(res, file.path);
+    this.handleReadFileLegacy(res, file.path);
   }
 
   handleListCommands(res: http.ServerResponse) {
@@ -414,6 +514,599 @@ export default class LLMBridgesPlugin extends Plugin {
 
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ success: true }));
+  }
+
+  // ===========================================================================
+  // Knowledge Base Handlers
+  // ===========================================================================
+
+  async handleListKnowledgeBases(res: http.ServerResponse) {
+    const kbs = await this.kbManager.listKnowledgeBases();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ knowledge_bases: kbs }));
+  }
+
+  async handleAddKnowledgeBase(
+    res: http.ServerResponse,
+    data: {
+      name: string;
+      description: string;
+      subfolder: string;
+      organization_rules: string;
+    }
+  ) {
+    const kb = await this.kbManager.addKnowledgeBase(
+      data.name,
+      data.description,
+      data.subfolder,
+      data.organization_rules
+    );
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        knowledge_base: kb,
+        next_steps:
+          "Knowledge base created. Please define folder constraints using add_knowledge_base_folder_constraint to specify machine-checkable metadata rules for notes under specific subfolders.",
+      })
+    );
+  }
+
+  async handleUpdateKnowledgeBase(
+    res: http.ServerResponse,
+    data: {
+      name: string;
+      description?: string;
+      subfolder?: string;
+      organization_rules?: string;
+    }
+  ) {
+    const kb = await this.kbManager.updateKnowledgeBase(data.name, {
+      description: data.description,
+      subfolder: data.subfolder,
+      organization_rules: data.organization_rules,
+    });
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ knowledge_base: kb }));
+  }
+
+  async handleAddFolderConstraint(
+    res: http.ServerResponse,
+    data: {
+      kb_name: string;
+      subfolder: string;
+      rules: ConstraintRules;
+    }
+  ) {
+    // Validate rules schema
+    const schemaValidation = validateConstraintRulesSchema(data.rules);
+    if (!schemaValidation.passed) {
+      const error: ApiError = {
+        code: "schema_validation_failed",
+        message: "Invalid constraint rules schema",
+        details: schemaValidation.issues,
+      };
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    const constraint = await this.kbManager.addFolderConstraint(
+      data.kb_name,
+      data.subfolder,
+      data.rules
+    );
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ folder_constraint: constraint }));
+  }
+
+  // ===========================================================================
+  // Note Handlers (KB-scoped with validation)
+  // ===========================================================================
+
+  async handleListNotes(
+    res: http.ServerResponse,
+    kbName: string,
+    subfolder?: string
+  ) {
+    const kb = await this.kbManager.getKnowledgeBase(kbName);
+    if (!kb) {
+      const error: ApiError = {
+        code: "knowledge_base_not_found",
+        message: `Knowledge base '${kbName}' not found`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    const searchPath = subfolder
+      ? this.kbManager.resolveNotePath(kb, subfolder)
+      : kb.subfolder;
+
+    const notes: { path: string }[] = [];
+    const collectNotes = (folder: TFolder) => {
+      for (const child of folder.children) {
+        if (child instanceof TFile && child.extension === "md") {
+          notes.push({ path: child.path });
+        } else if (child instanceof TFolder) {
+          collectNotes(child);
+        }
+      }
+    };
+
+    const folder = this.app.vault.getAbstractFileByPath(searchPath);
+    if (folder instanceof TFolder) {
+      collectNotes(folder);
+    }
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        knowledge_base: { name: kb.name, subfolder: kb.subfolder },
+        notes,
+      })
+    );
+  }
+
+  async handleCreateNote(
+    res: http.ServerResponse,
+    data: {
+      knowledge_base_name: string;
+      note_path: string;
+      note_content: string;
+    }
+  ) {
+    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
+    if (!kb) {
+      const error: ApiError = {
+        code: "knowledge_base_not_found",
+        message: `Knowledge base '${data.knowledge_base_name}' not found`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Resolve path
+    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
+
+    // Check if note already exists
+    if (this.kbManager.noteExists(resolvedPath)) {
+      const error: ApiError = {
+        code: "note_already_exists",
+        message: `Note already exists at '${resolvedPath}'`,
+      };
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Get applicable constraints and validate
+    const constraints = await this.kbManager.getFolderConstraints(kb.name);
+    const constraint = findApplicableConstraint(resolvedPath, constraints);
+
+    let validation: ValidationResult = { passed: true, issues: [] };
+    if (constraint) {
+      validation = validateNote(resolvedPath, data.note_content, constraint);
+      if (!validation.passed) {
+        const error: ConstraintViolationError = {
+          code: "folder_constraint_violation",
+          message: "Note does not satisfy folder constraint requirements",
+          constraint: {
+            kb_name: constraint.kb_name,
+            subfolder: constraint.subfolder,
+          },
+          issues: validation.issues,
+        };
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error }));
+        return;
+      }
+    }
+
+    // Create parent folders if needed
+    const folderPath = resolvedPath.substring(0, resolvedPath.lastIndexOf("/"));
+    if (folderPath) {
+      await this.ensureFolder(folderPath);
+    }
+
+    // Create the note
+    await this.app.vault.create(resolvedPath, data.note_content);
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        knowledge_base: kb,
+        note: {
+          path: resolvedPath,
+          content: data.note_content,
+        },
+        machine_validation: validation,
+        validation_instruction_for_llm: VALIDATION_INSTRUCTIONS.create_note,
+      })
+    );
+  }
+
+  async handleReadNote(
+    res: http.ServerResponse,
+    data: {
+      knowledge_base_name: string;
+      note_path: string;
+      offset?: number;
+      limit?: number;
+    }
+  ) {
+    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
+    if (!kb) {
+      const error: ApiError = {
+        code: "knowledge_base_not_found",
+        message: `Knowledge base '${data.knowledge_base_name}' not found`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Resolve path
+    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
+
+    const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+    if (!(file instanceof TFile)) {
+      const error: ApiError = {
+        code: "note_not_found",
+        message: `Note not found at '${resolvedPath}'`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    const fullContent = await this.app.vault.read(file);
+    const offset = data.offset || 0;
+    const limit = data.limit || DEFAULT_READ_LIMIT;
+
+    const chunk = fullContent.slice(offset, offset + limit);
+    const hasMore = offset + limit < fullContent.length;
+    const remainingChars = Math.max(0, fullContent.length - (offset + limit));
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        knowledge_base: kb,
+        note: {
+          path: resolvedPath,
+          content: chunk,
+          offset,
+          next_offset: offset + chunk.length,
+          has_more: hasMore,
+          remaining_chars: remainingChars,
+        },
+      })
+    );
+  }
+
+  async handleUpdateNote(
+    res: http.ServerResponse,
+    data: {
+      knowledge_base_name: string;
+      note_path: string;
+      note_content: string;
+    }
+  ) {
+    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
+    if (!kb) {
+      const error: ApiError = {
+        code: "knowledge_base_not_found",
+        message: `Knowledge base '${data.knowledge_base_name}' not found`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Resolve path
+    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
+
+    const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+    if (!(file instanceof TFile)) {
+      const error: ApiError = {
+        code: "note_not_found",
+        message: `Note not found at '${resolvedPath}'`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Read original content
+    const originalContent = await this.app.vault.read(file);
+
+    // Get applicable constraints and validate new content
+    const constraints = await this.kbManager.getFolderConstraints(kb.name);
+    const constraint = findApplicableConstraint(resolvedPath, constraints);
+
+    let validation: ValidationResult = { passed: true, issues: [] };
+    if (constraint) {
+      validation = validateNote(resolvedPath, data.note_content, constraint);
+      if (!validation.passed) {
+        const error: ConstraintViolationError = {
+          code: "folder_constraint_violation",
+          message: "Note does not satisfy folder constraint requirements",
+          constraint: {
+            kb_name: constraint.kb_name,
+            subfolder: constraint.subfolder,
+          },
+          issues: validation.issues,
+        };
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error }));
+        return;
+      }
+    }
+
+    // Update the note
+    await this.app.vault.modify(file, data.note_content);
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        knowledge_base: kb,
+        original_note: {
+          path: resolvedPath,
+          content: originalContent,
+        },
+        updated_note: {
+          path: resolvedPath,
+          content: data.note_content,
+        },
+        machine_validation: validation,
+        validation_instruction_for_llm: VALIDATION_INSTRUCTIONS.update_note,
+      })
+    );
+  }
+
+  async handleAppendNote(
+    res: http.ServerResponse,
+    data: {
+      knowledge_base_name: string;
+      note_path: string;
+      note_content: string;
+    }
+  ) {
+    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
+    if (!kb) {
+      const error: ApiError = {
+        code: "knowledge_base_not_found",
+        message: `Knowledge base '${data.knowledge_base_name}' not found`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Resolve path
+    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
+
+    const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+    if (!(file instanceof TFile)) {
+      const error: ApiError = {
+        code: "note_not_found",
+        message: `Note not found at '${resolvedPath}'`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Read original content
+    const originalContent = await this.app.vault.read(file);
+
+    // Construct new content
+    const newContent = originalContent.endsWith("\n")
+      ? originalContent + data.note_content
+      : originalContent + "\n" + data.note_content;
+
+    // Get applicable constraints and validate combined content
+    const constraints = await this.kbManager.getFolderConstraints(kb.name);
+    const constraint = findApplicableConstraint(resolvedPath, constraints);
+
+    let validation: ValidationResult = { passed: true, issues: [] };
+    if (constraint) {
+      validation = validateNote(resolvedPath, newContent, constraint);
+      if (!validation.passed) {
+        const error: ConstraintViolationError = {
+          code: "folder_constraint_violation",
+          message: "Note does not satisfy folder constraint requirements",
+          constraint: {
+            kb_name: constraint.kb_name,
+            subfolder: constraint.subfolder,
+          },
+          issues: validation.issues,
+        };
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error }));
+        return;
+      }
+    }
+
+    // Update the note
+    await this.app.vault.modify(file, newContent);
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        knowledge_base: kb,
+        original_note: {
+          path: resolvedPath,
+          content: originalContent,
+        },
+        updated_note: {
+          path: resolvedPath,
+          content: newContent,
+        },
+        machine_validation: validation,
+        validation_instruction_for_llm: VALIDATION_INSTRUCTIONS.append_note,
+      })
+    );
+  }
+
+  async handleMoveNote(
+    res: http.ServerResponse,
+    data: {
+      knowledge_base_name: string;
+      origin_note_path: string;
+      new_note_path: string;
+    }
+  ) {
+    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
+    if (!kb) {
+      const error: ApiError = {
+        code: "knowledge_base_not_found",
+        message: `Knowledge base '${data.knowledge_base_name}' not found`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Resolve paths
+    const originPath = this.kbManager.resolveNotePath(kb, data.origin_note_path);
+    const newPath = this.kbManager.resolveNotePath(kb, data.new_note_path);
+
+    // Check origin exists
+    const originFile = this.app.vault.getAbstractFileByPath(originPath);
+    if (!(originFile instanceof TFile)) {
+      const error: ApiError = {
+        code: "note_not_found",
+        message: `Note not found at '${originPath}'`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Check destination doesn't exist
+    if (this.kbManager.noteExists(newPath)) {
+      const error: ApiError = {
+        code: "note_already_exists",
+        message: `Note already exists at '${newPath}'`,
+      };
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Read content to validate against new path's constraints
+    const content = await this.app.vault.read(originFile);
+
+    // Get applicable constraints for new path and validate
+    const constraints = await this.kbManager.getFolderConstraints(kb.name);
+    const constraint = findApplicableConstraint(newPath, constraints);
+
+    let validation: ValidationResult = { passed: true, issues: [] };
+    if (constraint) {
+      validation = validateNote(newPath, content, constraint);
+      if (!validation.passed) {
+        const error: ConstraintViolationError = {
+          code: "folder_constraint_violation",
+          message: "Note does not satisfy folder constraint requirements for new location",
+          constraint: {
+            kb_name: constraint.kb_name,
+            subfolder: constraint.subfolder,
+          },
+          issues: validation.issues,
+        };
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error }));
+        return;
+      }
+    }
+
+    // Create parent folders for new path if needed
+    const newFolderPath = newPath.substring(0, newPath.lastIndexOf("/"));
+    if (newFolderPath) {
+      await this.ensureFolder(newFolderPath);
+    }
+
+    // Move the file
+    await this.app.vault.rename(originFile, newPath);
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        knowledge_base: kb,
+        origin_path: originPath,
+        new_path: newPath,
+        machine_validation: validation,
+        validation_instruction_for_llm: VALIDATION_INSTRUCTIONS.move_note,
+      })
+    );
+  }
+
+  async handleDeleteNote(
+    res: http.ServerResponse,
+    data: {
+      knowledge_base_name: string;
+      note_path: string;
+    }
+  ) {
+    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
+    if (!kb) {
+      const error: ApiError = {
+        code: "knowledge_base_not_found",
+        message: `Knowledge base '${data.knowledge_base_name}' not found`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    // Resolve path
+    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
+
+    const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+    if (!(file instanceof TFile)) {
+      const error: ApiError = {
+        code: "note_not_found",
+        message: `Note not found at '${resolvedPath}'`,
+      };
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+
+    await this.app.vault.delete(file);
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        knowledge_base: { name: kb.name, subfolder: kb.subfolder },
+        deleted_path: resolvedPath,
+      })
+    );
+  }
+
+  // ===========================================================================
+  // Utility Methods
+  // ===========================================================================
+
+  private async ensureFolder(path: string): Promise<void> {
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing) return;
+
+    const parts = path.split("/");
+    let currentPath = "";
+
+    for (const part of parts) {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      const folder = this.app.vault.getAbstractFileByPath(currentPath);
+      if (!folder) {
+        await this.app.vault.createFolder(currentPath);
+      }
+    }
   }
 
   copyMCPConfig() {

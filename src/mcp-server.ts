@@ -40,88 +40,317 @@ const server = new Server(
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
+      // =========================================================================
+      // Knowledge Base Management Tools
+      // =========================================================================
       {
-        name: "list_vault_files",
+        name: "list_knowledge_bases",
         description:
-          "List all files and folders in the Obsidian vault or a specific directory",
+          "List all defined Knowledge Bases in the vault. Returns name, description, subfolder, and creation time for each KB.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
+      {
+        name: "add_knowledge_base",
+        description:
+          "Create a new Knowledge Base to manage notes in a specific vault subfolder. After creating a KB, you should define folder constraints using add_knowledge_base_folder_constraint.",
         inputSchema: {
           type: "object",
           properties: {
-            path: {
+            name: {
+              type: "string",
+              description: "Unique identifier for the Knowledge Base",
+            },
+            description: {
+              type: "string",
+              description: "Human-readable description of what this KB is for",
+            },
+            subfolder: {
               type: "string",
               description:
-                "Path to list (empty for root, or a folder path like 'folder')",
-              default: "",
+                "Vault-relative folder path this KB will manage (e.g., 'research/ai')",
+            },
+            organization_rules: {
+              type: "string",
+              description:
+                "Human-readable guidelines for note organization (Markdown). These rules are used for semantic validation by the LLM.",
             },
           },
+          required: ["name", "description", "subfolder", "organization_rules"],
+        },
+      },
+      {
+        name: "update_knowledge_base",
+        description: "Update metadata of an existing Knowledge Base",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "Name of the KB to update",
+            },
+            description: {
+              type: "string",
+              description: "New description (optional)",
+            },
+            subfolder: {
+              type: "string",
+              description: "New subfolder path (optional)",
+            },
+            organization_rules: {
+              type: "string",
+              description: "New organization rules (optional)",
+            },
+          },
+          required: ["name"],
+        },
+      },
+      {
+        name: "add_knowledge_base_folder_constraint",
+        description:
+          "Define machine-checkable metadata rules for notes under a specific subfolder of a KB. These rules are enforced automatically - notes that don't comply will be rejected.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            kb_name: {
+              type: "string",
+              description: "Name of the Knowledge Base",
+            },
+            subfolder: {
+              type: "string",
+              description:
+                "Target folder path (vault-relative) for this constraint",
+            },
+            rules: {
+              type: "object",
+              description: "Structured metadata requirements",
+              properties: {
+                frontmatter: {
+                  type: "object",
+                  properties: {
+                    required_fields: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          name: { type: "string" },
+                          type: {
+                            type: "string",
+                            enum: ["string", "number", "boolean", "date", "array"],
+                          },
+                          pattern: { type: "string" },
+                          allowed_values: { type: "array" },
+                        },
+                        required: ["name", "type"],
+                      },
+                    },
+                  },
+                },
+                filename: {
+                  type: "object",
+                  properties: {
+                    pattern: {
+                      type: "string",
+                      description: "Regex pattern for valid filenames",
+                    },
+                  },
+                },
+                content: {
+                  type: "object",
+                  properties: {
+                    min_length: { type: "number" },
+                    max_length: { type: "number" },
+                    required_sections: {
+                      type: "array",
+                      items: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          required: ["kb_name", "subfolder", "rules"],
+        },
+      },
+
+      // =========================================================================
+      // Note Operations (KB-scoped with validation)
+      // =========================================================================
+      {
+        name: "list_notes",
+        description:
+          "List all notes managed under a Knowledge Base. Optionally filter by subfolder.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: {
+              type: "string",
+              description: "Name of the Knowledge Base",
+            },
+            subfolder: {
+              type: "string",
+              description: "Optional subfolder filter within the KB",
+            },
+          },
+          required: ["knowledge_base_name"],
+        },
+      },
+      {
+        name: "create_note",
+        description:
+          "Create a new note in a Knowledge Base. The note is validated against folder constraints before creation. Returns the KB's organization_rules for semantic validation.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: {
+              type: "string",
+              description: "Name of the Knowledge Base",
+            },
+            note_path: {
+              type: "string",
+              description: "Path for the note (relative to KB subfolder)",
+            },
+            note_content: {
+              type: "string",
+              description: "Full Markdown content for the note",
+            },
+          },
+          required: ["knowledge_base_name", "note_path", "note_content"],
         },
       },
       {
         name: "read_note",
         description:
-          "Read the content of a note from the Obsidian vault. Returns content, frontmatter, and tags.",
+          "Read a note's content from a Knowledge Base. Supports pagination for large files.",
         inputSchema: {
           type: "object",
           properties: {
-            path: {
+            knowledge_base_name: {
               type: "string",
-              description:
-                "Path to the note file (e.g., 'folder/note.md' or 'note.md')",
+              description: "Name of the Knowledge Base",
+            },
+            note_path: {
+              type: "string",
+              description: "Path to the note",
+            },
+            offset: {
+              type: "number",
+              description: "Character offset to start reading from (default: 0)",
+            },
+            limit: {
+              type: "number",
+              description: "Maximum characters to return (default: 10000)",
             },
           },
-          required: ["path"],
+          required: ["knowledge_base_name", "note_path"],
         },
       },
       {
-        name: "write_note",
+        name: "update_note",
         description:
-          "Create or overwrite a note in the Obsidian vault. Creates parent folders if needed.",
+          "Replace the entire content of an existing note. Returns both original and updated content for comparison. The note is validated against folder constraints.",
         inputSchema: {
           type: "object",
           properties: {
-            path: {
+            knowledge_base_name: {
               type: "string",
-              description: "Path for the note file (e.g., 'folder/note.md')",
+              description: "Name of the Knowledge Base",
             },
-            content: {
+            note_path: {
               type: "string",
-              description: "Content to write to the note (markdown)",
+              description: "Path to the note",
+            },
+            note_content: {
+              type: "string",
+              description: "New full Markdown content",
             },
           },
-          required: ["path", "content"],
+          required: ["knowledge_base_name", "note_path", "note_content"],
         },
       },
       {
-        name: "append_to_note",
+        name: "append_note",
         description:
-          "Append content to an existing note. Creates the note if it doesn't exist.",
+          "Append content to an existing note. Returns both original and updated content. The combined content is validated against folder constraints.",
         inputSchema: {
           type: "object",
           properties: {
-            path: {
+            knowledge_base_name: {
               type: "string",
-              description: "Path to the note file",
+              description: "Name of the Knowledge Base",
             },
-            content: {
+            note_path: {
               type: "string",
-              description: "Content to append to the note",
+              description: "Path to the note",
+            },
+            note_content: {
+              type: "string",
+              description: "Content to append",
             },
           },
-          required: ["path", "content"],
+          required: ["knowledge_base_name", "note_path", "note_content"],
+        },
+      },
+      {
+        name: "move_note",
+        description:
+          "Move a note to a new path within the same KB. The note is validated against the new location's folder constraints.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: {
+              type: "string",
+              description: "Name of the Knowledge Base",
+            },
+            origin_note_path: {
+              type: "string",
+              description: "Current path of the note",
+            },
+            new_note_path: {
+              type: "string",
+              description: "Destination path for the note",
+            },
+          },
+          required: ["knowledge_base_name", "origin_note_path", "new_note_path"],
         },
       },
       {
         name: "delete_note",
-        description: "Delete a note from the Obsidian vault",
+        description: "Delete a note from a Knowledge Base",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: {
+              type: "string",
+              description: "Name of the Knowledge Base",
+            },
+            note_path: {
+              type: "string",
+              description: "Path to the note to delete",
+            },
+          },
+          required: ["knowledge_base_name", "note_path"],
+        },
+      },
+
+      // =========================================================================
+      // Legacy Tools (for backward compatibility)
+      // =========================================================================
+      {
+        name: "list_vault_files",
+        description:
+          "List all files and folders in the Obsidian vault or a specific directory. Use list_notes for KB-scoped listing.",
         inputSchema: {
           type: "object",
           properties: {
             path: {
               type: "string",
-              description: "Path to the note file to delete",
+              description: "Path to list (empty for root)",
+              default: "",
             },
           },
-          required: ["path"],
         },
       },
       {
@@ -137,8 +366,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             contextLength: {
               type: "number",
-              description:
-                "Number of characters of context around each match (default: 100)",
+              description: "Number of characters of context around each match (default: 100)",
               default: 100,
             },
           },
@@ -165,7 +393,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "execute_command",
         description:
-          "Execute an Obsidian command by its ID (e.g., 'app:open-settings', 'editor:toggle-bold')",
+          "Execute an Obsidian command by its ID (e.g., 'app:open-settings')",
         inputSchema: {
           type: "object",
           properties: {
@@ -187,6 +415,285 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
+      // =======================================================================
+      // Knowledge Base Management
+      // =======================================================================
+      case "list_knowledge_bases": {
+        const response = await apiRequest("/kb");
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error?.message || `Failed to list KBs: ${response.status}`);
+        }
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "add_knowledge_base": {
+        const response = await apiRequest("/kb", {
+          method: "POST",
+          body: JSON.stringify({
+            name: args?.name,
+            description: args?.description,
+            subfolder: args?.subfolder,
+            organization_rules: args?.organization_rules,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error?.message || `Failed to create KB: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "update_knowledge_base": {
+        const response = await apiRequest("/kb", {
+          method: "PUT",
+          body: JSON.stringify({
+            name: args?.name,
+            description: args?.description,
+            subfolder: args?.subfolder,
+            organization_rules: args?.organization_rules,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error?.message || `Failed to update KB: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "add_knowledge_base_folder_constraint": {
+        const response = await apiRequest("/kb/constraint", {
+          method: "POST",
+          body: JSON.stringify({
+            kb_name: args?.kb_name,
+            subfolder: args?.subfolder,
+            rules: args?.rules,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error?.message || `Failed to add constraint: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // =======================================================================
+      // Note Operations (KB-scoped)
+      // =======================================================================
+      case "list_notes": {
+        const kbName = args?.knowledge_base_name as string;
+        const subfolder = args?.subfolder as string | undefined;
+
+        if (!kbName) throw new Error("knowledge_base_name is required");
+
+        const params = new URLSearchParams({ kb: kbName });
+        if (subfolder) params.append("subfolder", subfolder);
+
+        const response = await apiRequest(`/kb/notes?${params}`);
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error?.message || `Failed to list notes: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "create_note": {
+        const response = await apiRequest("/kb/note/create", {
+          method: "POST",
+          body: JSON.stringify({
+            knowledge_base_name: args?.knowledge_base_name,
+            note_path: args?.note_path,
+            note_content: args?.note_content,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          // Include full error details for constraint violations
+          if (error.error?.code === "folder_constraint_violation") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Constraint Violation: ${error.error.message}\n\nIssues:\n${JSON.stringify(error.error.issues, null, 2)}\n\nPlease fix the note content to satisfy the folder constraints and try again.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+          throw new Error(error.error?.message || `Failed to create note: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "read_note": {
+        const response = await apiRequest("/kb/note/read", {
+          method: "POST",
+          body: JSON.stringify({
+            knowledge_base_name: args?.knowledge_base_name,
+            note_path: args?.note_path,
+            offset: args?.offset,
+            limit: args?.limit,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error?.message || `Failed to read note: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "update_note": {
+        const response = await apiRequest("/kb/note/update", {
+          method: "POST",
+          body: JSON.stringify({
+            knowledge_base_name: args?.knowledge_base_name,
+            note_path: args?.note_path,
+            note_content: args?.note_content,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          if (error.error?.code === "folder_constraint_violation") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Constraint Violation: ${error.error.message}\n\nIssues:\n${JSON.stringify(error.error.issues, null, 2)}\n\nPlease fix the note content to satisfy the folder constraints and try again.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+          throw new Error(error.error?.message || `Failed to update note: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "append_note": {
+        const response = await apiRequest("/kb/note/append", {
+          method: "POST",
+          body: JSON.stringify({
+            knowledge_base_name: args?.knowledge_base_name,
+            note_path: args?.note_path,
+            note_content: args?.note_content,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          if (error.error?.code === "folder_constraint_violation") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Constraint Violation: ${error.error.message}\n\nIssues:\n${JSON.stringify(error.error.issues, null, 2)}\n\nPlease fix the content to satisfy the folder constraints and try again.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+          throw new Error(error.error?.message || `Failed to append to note: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "move_note": {
+        const response = await apiRequest("/kb/note/move", {
+          method: "POST",
+          body: JSON.stringify({
+            knowledge_base_name: args?.knowledge_base_name,
+            origin_note_path: args?.origin_note_path,
+            new_note_path: args?.new_note_path,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          if (error.error?.code === "folder_constraint_violation") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Constraint Violation: ${error.error.message}\n\nIssues:\n${JSON.stringify(error.error.issues, null, 2)}\n\nThe note cannot be moved to this location because it doesn't satisfy the folder constraints.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+          throw new Error(error.error?.message || `Failed to move note: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "delete_note": {
+        const response = await apiRequest("/kb/note/delete", {
+          method: "POST",
+          body: JSON.stringify({
+            knowledge_base_name: args?.knowledge_base_name,
+            note_path: args?.note_path,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error?.message || `Failed to delete note: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // =======================================================================
+      // Legacy Tools
+      // =======================================================================
       case "list_vault_files": {
         const path = (args?.path as string) || "";
         const queryParams = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -199,117 +706,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const data = await response.json();
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "read_note": {
-        const path = args?.path as string;
-        if (!path) {
-          throw new Error("Path is required");
-        }
-
-        const response = await apiRequest("/vault/read", {
-          method: "POST",
-          body: JSON.stringify({ path }),
-        });
-
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error || `Failed to read note: ${response.status}`);
-        }
-
-        const data = await response.json();
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "write_note": {
-        const path = args?.path as string;
-        const content = args?.content as string;
-
-        if (!path) throw new Error("Path is required");
-        if (content === undefined) throw new Error("Content is required");
-
-        const response = await apiRequest("/vault/write", {
-          method: "POST",
-          body: JSON.stringify({ path, content }),
-        });
-
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error || `Failed to write note: ${response.status}`);
-        }
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Successfully wrote to ${path}`,
-            },
-          ],
-        };
-      }
-
-      case "append_to_note": {
-        const path = args?.path as string;
-        const content = args?.content as string;
-
-        if (!path) throw new Error("Path is required");
-        if (content === undefined) throw new Error("Content is required");
-
-        const response = await apiRequest("/vault/append", {
-          method: "POST",
-          body: JSON.stringify({ path, content }),
-        });
-
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error || `Failed to append to note: ${response.status}`);
-        }
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Successfully appended to ${path}`,
-            },
-          ],
-        };
-      }
-
-      case "delete_note": {
-        const path = args?.path as string;
-        if (!path) throw new Error("Path is required");
-
-        const response = await apiRequest("/vault/delete", {
-          method: "POST",
-          body: JSON.stringify({ path }),
-        });
-
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error || `Failed to delete note: ${response.status}`);
-        }
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Successfully deleted ${path}`,
-            },
-          ],
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         };
       }
 
@@ -331,12 +728,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const data = await response.json();
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         };
       }
 
@@ -350,12 +742,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const data = await response.json();
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         };
       }
 
@@ -369,12 +756,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const data = await response.json();
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         };
       }
 
@@ -393,12 +775,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         return {
-          content: [
-            {
-              type: "text",
-              text: `Successfully executed command: ${commandId}`,
-            },
-          ],
+          content: [{ type: "text", text: `Successfully executed command: ${commandId}` }],
         };
       }
 
@@ -408,12 +785,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${errorMessage}`,
-        },
-      ],
+      content: [{ type: "text", text: `Error: ${errorMessage}` }],
       isError: true,
     };
   }
