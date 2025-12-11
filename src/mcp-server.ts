@@ -1,13 +1,18 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 
 const API_BASE = process.env.OBSIDIAN_API_URL || "http://127.0.0.1:27124";
+const MCP_PORT = parseInt(process.env.MCP_PORT || "3100", 10);
+const MCP_MODE = process.env.MCP_MODE || "stdio"; // "stdio" or "sse"
 const API_KEY = process.env.OBSIDIAN_API_KEY || "";
 
 async function apiRequest(
@@ -847,9 +852,94 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 // Start the server
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Obsidian MCP Server running on stdio");
+  if (MCP_MODE === "sse") {
+    // SSE mode for web-based LLMs
+    const sessions = new Map<string, SSEServerTransport>();
+
+    const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      // CORS headers
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      const url = new URL(req.url || "/", `http://127.0.0.1:${MCP_PORT}`);
+
+      // Health check
+      if (url.pathname === "/" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", mode: "sse", port: MCP_PORT }));
+        return;
+      }
+
+      // SSE endpoint - establish connection
+      if (url.pathname === "/sse" && req.method === "GET") {
+        console.error(`New SSE connection from ${req.socket.remoteAddress}`);
+        const transport = new SSEServerTransport("/messages", res);
+        const sessionId = randomUUID();
+        sessions.set(sessionId, transport);
+
+        transport.onclose = () => {
+          console.error(`SSE connection closed: ${sessionId}`);
+          sessions.delete(sessionId);
+        };
+
+        await server.connect(transport);
+        await transport.start();
+        return;
+      }
+
+      // Message endpoint - receive messages from client
+      if (url.pathname === "/messages" && req.method === "POST") {
+        const sessionId = url.searchParams.get("sessionId");
+        if (!sessionId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing sessionId" }));
+          return;
+        }
+
+        const transport = sessions.get(sessionId);
+        if (!transport) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Session not found" }));
+          return;
+        }
+
+        let body = "";
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", async () => {
+          try {
+            await transport.handlePostMessage(req, res, JSON.parse(body));
+          } catch (error) {
+            console.error("Error handling message:", error);
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Internal server error" }));
+          }
+        });
+        return;
+      }
+
+      // 404 for unknown routes
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    });
+
+    httpServer.listen(MCP_PORT, "0.0.0.0", () => {
+      console.error(`Obsidian MCP Server running on SSE mode at http://0.0.0.0:${MCP_PORT}`);
+      console.error(`  - SSE endpoint: http://0.0.0.0:${MCP_PORT}/sse`);
+      console.error(`  - Message endpoint: http://0.0.0.0:${MCP_PORT}/messages`);
+    });
+  } else {
+    // Stdio mode for Claude Desktop
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("Obsidian MCP Server running on stdio");
+  }
 }
 
 main().catch(console.error);

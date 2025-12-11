@@ -89,13 +89,63 @@ After installing, enable the plugin in Obsidian. It will automatically:
 - Generate an API key
 - Start the local server on port 27124
 
-### 2. (Optional) Configure Reverse Proxy for HTTPS
+### 2. (Optional) SSE Mode for Web-based LLMs
 
-For secure connections from ChatGPT/Claude to the MCP server, set up a reverse proxy with HTTPS. The proxy sits between the LLM and your MCP server endpoint.
+The MCP server supports two modes:
 
-> **Note**: The reverse proxy configuration depends on how you deploy the MCP server. This is typically needed when exposing the MCP server to cloud-based LLMs.
+| Mode | Port | Use Case |
+|------|------|----------|
+| **stdio** (default) | N/A | Claude Desktop (local) |
+| **sse** | 3100 | Web-based LLMs via reverse proxy |
 
-### 3. Configure Claude Desktop
+To run in SSE mode:
+
+```bash
+MCP_MODE=sse MCP_PORT=3100 npx obsidian-llm-bridges
+```
+
+Environment variables:
+- `MCP_MODE`: `stdio` (default) or `sse`
+- `MCP_PORT`: Port for SSE server (default: 3100)
+- `OBSIDIAN_API_URL`: Plugin HTTP server URL
+- `OBSIDIAN_API_KEY`: Your API key
+
+### 3. (Optional) Configure Reverse Proxy for HTTPS
+
+For secure connections from ChatGPT/Claude to the MCP server, set up a reverse proxy with HTTPS:
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   ChatGPT /     │────▶│  Reverse Proxy  │────▶│  MCP Server      │────▶│  LLM Bridges    │
+│   Claude        │◀────│  (HTTPS:443)    │◀────│  (SSE:3100)      │◀────│  (HTTP:27124)   │
+└─────────────────┘     └─────────────────┘     └──────────────────┘     └─────────────────┘
+```
+
+Example with Nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name mcp.yourdomain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3100;
+        proxy_http_version 1.1;
+        proxy_set_header Connection '';
+        proxy_set_header Host $host;
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding off;
+    }
+}
+```
+
+> **Note**: HTTPS is not provided by this repo directly. You need to configure your own reverse proxy with SSL certificates.
+
+### 4. Configure Claude Desktop
 
 Add the MCP server to your Claude configuration file:
 
@@ -136,11 +186,11 @@ For local development without HTTPS:
 
 **Tip**: Use the "Copy MCP Configuration" button in the plugin settings to get the config with your actual API key.
 
-### 4. Restart Claude Desktop
+### 5. Restart Claude Desktop
 
 Close and reopen Claude Desktop to load the MCP server.
 
-### 5. Start Using
+### 6. Start Using
 
 You can now ask Claude to:
 
