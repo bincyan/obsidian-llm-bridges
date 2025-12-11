@@ -18,13 +18,13 @@ No separate API keys needed. Just your existing subscription.
 ## How It Works
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   ChatGPT /     │────▶│  MCP Server      │────▶│  Reverse Proxy  │────▶│  LLM Bridges    │────▶ Obsidian
-│   Claude        │◀────│  (npx)           │◀────│  (HTTPS)        │◀────│  (this plugin)  │◀────  Vault
-└─────────────────┘     └──────────────────┘     └─────────────────┘     └─────────────────┘
+┌─────────────────┐     ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   ChatGPT /     │────▶│  Reverse Proxy  │────▶│  MCP Server      │────▶│  LLM Bridges    │────▶ Obsidian
+│   Claude        │◀────│  (HTTPS)        │◀────│  (this repo)     │◀────│  (this plugin)  │◀────  Vault
+└─────────────────┘     └─────────────────┘     └──────────────────┘     └─────────────────┘
 ```
 
-The plugin runs a local HTTP server inside Obsidian that exposes vault operations. A reverse proxy (e.g., Nginx, Caddy) provides HTTPS termination for secure connections. The MCP server (run via npx) connects Claude to the proxy endpoint.
+The plugin runs a local HTTP server inside Obsidian that exposes vault operations. The MCP server connects to the plugin's HTTP server. A reverse proxy (e.g., Nginx, Caddy) sits between the LLM (ChatGPT/Claude) and the MCP server, providing HTTPS termination for secure connections.
 
 > **Note**: HTTPS is not provided by this repo directly. You need to configure your own reverse proxy with SSL certificates for production use.
 
@@ -91,31 +91,9 @@ After installing, enable the plugin in Obsidian. It will automatically:
 
 ### 2. (Optional) Configure Reverse Proxy for HTTPS
 
-For secure connections, set up a reverse proxy with HTTPS. Example with Caddy:
+For secure connections from ChatGPT/Claude to the MCP server, set up a reverse proxy with HTTPS. The proxy sits between the LLM and your MCP server endpoint.
 
-```
-obsidian.localhost {
-    reverse_proxy 127.0.0.1:27124
-}
-```
-
-Or with Nginx:
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name obsidian.localhost;
-
-    ssl_certificate /path/to/cert.pem;
-    ssl_certificate_key /path/to/key.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:27124;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
+> **Note**: The reverse proxy configuration depends on how you deploy the MCP server. This is typically needed when exposing the MCP server to cloud-based LLMs.
 
 ### 3. Configure Claude Desktop
 
