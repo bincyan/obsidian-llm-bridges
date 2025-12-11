@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import path from 'path';
 
 export default defineConfig({
   test: {
@@ -9,14 +10,14 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
       include: ['src/**/*.ts'],
-      exclude: ['src/main.ts', 'src/mcp-server.ts'], // Exclude Obsidian-dependent files
+      exclude: ['src/main.ts', 'src/mcp-server.ts'], // Exclude Obsidian-dependent entry points
     },
     testTimeout: 10000,
   },
   resolve: {
     alias: {
-      // Mock Obsidian module for testing
-      obsidian: './tests/mocks/obsidian.ts',
+      // Mock Obsidian module for testing - enables Level 2 testing
+      obsidian: path.resolve(__dirname, 'tests/mocks/obsidian.ts'),
     },
   },
 });
