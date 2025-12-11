@@ -89,26 +89,49 @@ After installing, enable the plugin in Obsidian. It will automatically:
 - Generate an API key
 - Start the local server on port 27124
 
-### 2. (Optional) SSE Mode for Web-based LLMs
+### 2. MCP Server Modes
 
-The MCP server supports two modes:
+The MCP server supports two transport modes:
 
 | Mode | Port | Use Case |
 |------|------|----------|
-| **stdio** (default) | N/A | Claude Desktop (local) |
-| **sse** | 3100 | Web-based LLMs via reverse proxy |
+| **sse** (default) | 3100 | Web-based LLMs via reverse proxy |
+| **stdio** | N/A | Claude Desktop (local) |
 
-To run in SSE mode:
+**Start MCP server (SSE mode)**:
 
 ```bash
-MCP_MODE=sse MCP_PORT=3100 npx obsidian-llm-bridges
+MCP_API_KEY=your-secret-key \
+OBSIDIAN_API_KEY=plugin-api-key \
+npx obsidian-llm-bridges
 ```
 
-Environment variables:
-- `MCP_MODE`: `stdio` (default) or `sse`
-- `MCP_PORT`: Port for SSE server (default: 3100)
-- `OBSIDIAN_API_URL`: Plugin HTTP server URL
-- `OBSIDIAN_API_KEY`: Your API key
+**Environment variables**:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCP_MODE` | Transport mode: `sse` or `stdio` | `sse` |
+| `MCP_PORT` | SSE server port | `3100` |
+| `MCP_API_KEY` | Bearer token for SSE authentication (LLM → MCP) | _(none)_ |
+| `OBSIDIAN_API_URL` | Obsidian plugin HTTP server URL | `http://127.0.0.1:27124` |
+| `OBSIDIAN_API_KEY` | API key for Obsidian plugin (MCP → Plugin) | _(none)_ |
+
+**Authentication flow**:
+
+```
+LLM (ChatGPT/Claude)
+    │
+    │  Authorization: Bearer <MCP_API_KEY>
+    ▼
+MCP Server (SSE:3100)
+    │
+    │  Authorization: Bearer <OBSIDIAN_API_KEY>
+    ▼
+Obsidian Plugin (HTTP:27124)
+    │
+    ▼
+Vault
+```
 
 ### 3. (Optional) Configure Reverse Proxy for HTTPS
 

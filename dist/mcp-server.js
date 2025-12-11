@@ -28626,8 +28626,9 @@ import { createServer } from "node:http";
 import { randomUUID as randomUUID2 } from "node:crypto";
 var API_BASE = process.env.OBSIDIAN_API_URL || "http://127.0.0.1:27124";
 var MCP_PORT = parseInt(process.env.MCP_PORT || "3100", 10);
-var MCP_MODE = process.env.MCP_MODE || "stdio";
+var MCP_MODE = process.env.MCP_MODE || "sse";
 var API_KEY = process.env.OBSIDIAN_API_KEY || "";
+var MCP_API_KEY = process.env.MCP_API_KEY || "";
 async function apiRequest(path, options = {}) {
   const headers = {
     Authorization: `Bearer ${API_KEY}`,
@@ -29388,6 +29389,15 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 async function main() {
   if (MCP_MODE === "sse") {
     const sessions = /* @__PURE__ */ new Map();
+    const validateAuth = (req) => {
+      if (!MCP_API_KEY)
+        return true;
+      const authHeader = req.headers.authorization;
+      if (!authHeader)
+        return false;
+      const [type, token] = authHeader.split(" ");
+      return type === "Bearer" && token === MCP_API_KEY;
+    };
     const httpServer = createServer(async (req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -29400,7 +29410,12 @@ async function main() {
       const url = new URL(req.url || "/", `http://127.0.0.1:${MCP_PORT}`);
       if (url.pathname === "/" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", mode: "sse", port: MCP_PORT }));
+        res.end(JSON.stringify({ status: "ok", mode: "sse", port: MCP_PORT, auth: !!MCP_API_KEY }));
+        return;
+      }
+      if (!validateAuth(req)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unauthorized", message: "Invalid or missing Bearer token" }));
         return;
       }
       if (url.pathname === "/sse" && req.method === "GET") {

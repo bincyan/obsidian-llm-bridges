@@ -12,8 +12,13 @@ import { randomUUID } from "node:crypto";
 
 const API_BASE = process.env.OBSIDIAN_API_URL || "http://127.0.0.1:27124";
 const MCP_PORT = parseInt(process.env.MCP_PORT || "3100", 10);
-const MCP_MODE = process.env.MCP_MODE || "stdio"; // "stdio" or "sse"
+const MCP_MODE = process.env.MCP_MODE || "sse"; // "sse" (default) or "stdio"
+
+// OBSIDIAN_API_KEY: Used by MCP server to authenticate with Obsidian plugin (internal)
 const API_KEY = process.env.OBSIDIAN_API_KEY || "";
+
+// MCP_API_KEY: Used by LLMs to authenticate with MCP server SSE endpoint (external)
+const MCP_API_KEY = process.env.MCP_API_KEY || "";
 
 async function apiRequest(
   path: string,
@@ -856,6 +861,15 @@ async function main() {
     // SSE mode for web-based LLMs
     const sessions = new Map<string, SSEServerTransport>();
 
+    // Helper to validate Bearer token
+    const validateAuth = (req: IncomingMessage): boolean => {
+      if (!MCP_API_KEY) return true; // No auth required if key not set
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return false;
+      const [type, token] = authHeader.split(" ");
+      return type === "Bearer" && token === MCP_API_KEY;
+    };
+
     const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       // CORS headers
       res.setHeader("Access-Control-Allow-Origin", "*");
@@ -870,10 +884,17 @@ async function main() {
 
       const url = new URL(req.url || "/", `http://127.0.0.1:${MCP_PORT}`);
 
-      // Health check
+      // Health check (no auth required)
       if (url.pathname === "/" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", mode: "sse", port: MCP_PORT }));
+        res.end(JSON.stringify({ status: "ok", mode: "sse", port: MCP_PORT, auth: !!MCP_API_KEY }));
+        return;
+      }
+
+      // Validate auth for SSE and message endpoints
+      if (!validateAuth(req)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unauthorized", message: "Invalid or missing Bearer token" }));
         return;
       }
 
