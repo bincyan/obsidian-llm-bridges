@@ -2,6 +2,7 @@
   "name": "obsidian-llm-bridges",
   "version": "1.0.0",
   "description": "Bridge your Obsidian vault with LLMs like ChatGPT and Claude",
+  "type": "module",
   "main": "main.js",
   "bin": {
     "obsidian-mcp": "./dist/mcp-server.js"
