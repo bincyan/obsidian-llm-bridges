@@ -1,5 +1,5 @@
 # Build output
-main.js
+# main.js  # Keep main.js tracked for BRAT compatibility
 *.js.map
 
 # npm
