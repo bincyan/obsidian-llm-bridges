@@ -44,37 +44,6 @@ var http = __toESM(require("http"), 1);
 var import_obsidian = require("obsidian");
 
 // src/types.ts
-var VALIDATION_INSTRUCTIONS = {
-  create_note: `Please verify the note against the knowledge base's organization_rules:
-
-1. Check that the note content follows the organization guidelines
-2. Ensure the note structure matches KB conventions
-3. Verify all recommended metadata is present
-
-If any issues are found, call update_note with corrected content.`,
-  update_note: `Please verify the update against the knowledge base's organization_rules:
-
-1. Compare original and updated content to ensure no important information was lost
-2. Check that the updated note follows the organization guidelines
-3. Verify the note structure matches KB conventions
-4. Ensure all links and references are intact
-
-If any issues are found, call update_note again with corrected content.`,
-  append_note: `Please verify the append operation against the knowledge base's organization_rules:
-
-1. Check that the combined content makes logical sense
-2. Verify the appended content integrates well with existing content
-3. Ensure no duplicate information was introduced
-4. Check that overall note structure remains compliant
-
-If any issues are found, call update_note with corrected content.`,
-  move_note: `Please verify the moved note against the knowledge base's organization_rules:
-
-1. Check that the note content still follows organization guidelines for its new location
-2. Verify any path-dependent content (links, references) is still valid
-
-If any issues are found, call update_note with corrected content.`
-};
 var LLM_BRIDGES_DIR = ".llm_bridges";
 var KNOWLEDGE_BASE_DIR = "knowledge_base";
 var FOLDER_CONSTRAINTS_DIR = "folder_constraints";
@@ -927,13 +896,14 @@ function validateConstraintRulesSchema(rules) {
 
 // src/main.ts
 var DEFAULT_SETTINGS = {
-  port: 27124,
+  port: 3100,
   apiKey: ""
 };
 var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
   constructor() {
     super(...arguments);
     this.server = null;
+    this.sessions = /* @__PURE__ */ new Map();
   }
   async onload() {
     await this.loadSettings();
@@ -977,47 +947,105 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
     }
     return result;
   }
+  // ===========================================================================
+  // MCP SSE Server
+  // ===========================================================================
   startServer() {
     if (this.server) {
       this.server.close();
     }
     this.server = http.createServer(async (req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
       if (req.method === "OPTIONS") {
-        res.writeHead(200);
+        res.writeHead(204);
         res.end();
         return;
       }
-      const authHeader = req.headers.authorization;
-      if (authHeader !== `Bearer ${this.settings.apiKey}`) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Unauthorized" }));
+      const url = new URL(req.url || "/", `http://127.0.0.1:${this.settings.port}`);
+      if (url.pathname === "/" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          status: "ok",
+          version: this.manifest.version,
+          vault: this.app.vault.getName()
+        }));
         return;
       }
-      try {
-        await this.handleRequest(req, res);
-      } catch (error) {
-        console.error("LLM Bridges error:", error);
-        if (this.isApiError(error)) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error }));
+      if (this.settings.apiKey) {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || authHeader !== `Bearer ${this.settings.apiKey}`) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unauthorized", message: "Invalid or missing Bearer token" }));
           return;
         }
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: String(error) }));
       }
+      if (url.pathname === "/sse" && req.method === "GET") {
+        const sessionId = this.generateSessionId();
+        console.log(`MCP: New SSE connection ${sessionId}`);
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive"
+        });
+        res.write(`event: endpoint
+data: /messages?sessionId=${sessionId}
+
+`);
+        this.sessions.set(sessionId, res);
+        req.on("close", () => {
+          console.log(`MCP: SSE connection closed ${sessionId}`);
+          this.sessions.delete(sessionId);
+        });
+        return;
+      }
+      if (url.pathname === "/messages" && req.method === "POST") {
+        const sessionId = url.searchParams.get("sessionId");
+        if (!sessionId || !this.sessions.has(sessionId)) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Session not found" }));
+          return;
+        }
+        let body = "";
+        req.on("data", (chunk) => body += chunk);
+        req.on("end", async () => {
+          try {
+            const request = JSON.parse(body);
+            const response = await this.handleMCPRequest(request);
+            const sseRes = this.sessions.get(sessionId);
+            if (sseRes) {
+              sseRes.write(`event: message
+data: ${JSON.stringify(response)}
+
+`);
+            }
+            res.writeHead(202, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ status: "accepted" }));
+          } catch (error) {
+            console.error("MCP: Error handling message:", error);
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Internal server error" }));
+          }
+        });
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
     });
     this.server.listen(this.settings.port, "127.0.0.1", () => {
-      console.log(`LLM Bridges listening on http://127.0.0.1:${this.settings.port}`);
+      console.log(`LLM Bridges MCP Server listening on http://127.0.0.1:${this.settings.port}`);
     });
     this.server.on("error", (err) => {
-      console.error("LLM Bridges server error:", err);
+      console.error("MCP Server error:", err);
       new import_obsidian2.Notice(`LLM Bridges: Server error - ${err.message}`);
     });
   }
   stopServer() {
+    for (const [sessionId, res] of this.sessions) {
+      res.end();
+    }
+    this.sessions.clear();
     if (this.server) {
       this.server.close();
       this.server = null;
@@ -1028,668 +1056,536 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
     this.startServer();
     new import_obsidian2.Notice(`LLM Bridges restarted on port ${this.settings.port}`);
   }
-  isApiError(error) {
-    return typeof error === "object" && error !== null && "code" in error && "message" in error;
-  }
-  async handleRequest(req, res) {
-    const url = new URL(req.url || "/", `http://127.0.0.1:${this.settings.port}`);
-    const path = url.pathname;
-    let body = "";
-    if (req.method === "POST" || req.method === "PUT") {
-      body = await new Promise((resolve) => {
-        let data = "";
-        req.on("data", (chunk) => data += chunk);
-        req.on("end", () => resolve(data));
-      });
-    }
-    if (path === "/" && req.method === "GET") {
-      return this.handleStatus(res);
-    }
-    if (path === "/vault" && req.method === "GET") {
-      return this.handleListFiles(res, url.searchParams.get("path") || "");
-    }
-    if (path === "/vault/read" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleReadFileLegacy(res, data.path);
-    }
-    if (path === "/vault/write" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleWriteFileLegacy(res, data.path, data.content);
-    }
-    if (path === "/vault/append" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleAppendFileLegacy(res, data.path, data.content);
-    }
-    if (path === "/vault/delete" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleDeleteFileLegacy(res, data.path);
-    }
-    if (path === "/search" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleSearch(res, data.query, data.contextLength || 100);
-    }
-    if (path === "/active" && req.method === "GET") {
-      return this.handleGetActive(res);
-    }
-    if (path === "/commands" && req.method === "GET") {
-      return this.handleListCommands(res);
-    }
-    if (path === "/commands/execute" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleExecuteCommand(res, data.commandId);
-    }
-    if (path === "/kb" && req.method === "GET") {
-      return this.handleListKnowledgeBases(res);
-    }
-    if (path === "/kb" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleAddKnowledgeBase(res, data);
-    }
-    if (path === "/kb" && req.method === "PUT") {
-      const data = JSON.parse(body);
-      return this.handleUpdateKnowledgeBase(res, data);
-    }
-    if (path === "/kb/constraint" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleAddFolderConstraint(res, data);
-    }
-    if (path === "/kb/notes" && req.method === "GET") {
-      const kbName = url.searchParams.get("kb");
-      const subfolder = url.searchParams.get("subfolder") || void 0;
-      return this.handleListNotes(res, kbName || "", subfolder);
-    }
-    if (path === "/kb/note/create" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleCreateNote(res, data);
-    }
-    if (path === "/kb/note/read" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleReadNote(res, data);
-    }
-    if (path === "/kb/note/update" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleUpdateNote(res, data);
-    }
-    if (path === "/kb/note/append" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleAppendNote(res, data);
-    }
-    if (path === "/kb/note/move" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleMoveNote(res, data);
-    }
-    if (path === "/kb/note/delete" && req.method === "POST") {
-      const data = JSON.parse(body);
-      return this.handleDeleteNote(res, data);
-    }
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Not found" }));
+  generateSessionId() {
+    return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
   }
   // ===========================================================================
-  // Status & Legacy Handlers
+  // MCP Request Handler
   // ===========================================================================
-  handleStatus(res) {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        status: "ok",
-        version: this.manifest.version,
-        vault: this.app.vault.getName()
-      })
-    );
-  }
-  handleListFiles(res, folderPath) {
-    const files = [];
-    const listRecursive = (folder, prefix) => {
-      for (const child of folder.children) {
-        const childPath = prefix ? `${prefix}/${child.name}` : child.name;
-        if (child instanceof import_obsidian2.TFile) {
-          files.push(childPath);
-        } else if (child instanceof import_obsidian2.TFolder) {
-          files.push(childPath + "/");
-        }
+  async handleMCPRequest(request) {
+    const { id, method, params } = request;
+    try {
+      let result;
+      switch (method) {
+        case "initialize":
+          result = {
+            protocolVersion: "2024-11-05",
+            capabilities: { tools: {}, resources: {} },
+            serverInfo: { name: "obsidian-llm-bridges", version: this.manifest.version }
+          };
+          break;
+        case "tools/list":
+          result = { tools: this.getMCPTools() };
+          break;
+        case "tools/call":
+          result = await this.handleMCPToolCall(params);
+          break;
+        case "resources/list":
+          result = { resources: this.getMCPResources() };
+          break;
+        case "resources/read":
+          result = await this.handleMCPResourceRead(params);
+          break;
+        default:
+          return {
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32601, message: `Method not found: ${method}` }
+          };
       }
-    };
-    if (folderPath) {
-      const folder = this.app.vault.getAbstractFileByPath(folderPath);
-      if (folder instanceof import_obsidian2.TFolder) {
-        listRecursive(folder, "");
-      } else {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Folder not found" }));
-        return;
-      }
-    } else {
-      listRecursive(this.app.vault.getRoot(), "");
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ files }));
-  }
-  async handleReadFileLegacy(res, filePath) {
-    var _a;
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof import_obsidian2.TFile)) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "File not found" }));
-      return;
-    }
-    const content = await this.app.vault.read(file);
-    const cache = this.app.metadataCache.getFileCache(file);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        path: file.path,
-        content,
-        frontmatter: (cache == null ? void 0 : cache.frontmatter) || {},
-        tags: ((_a = cache == null ? void 0 : cache.tags) == null ? void 0 : _a.map((t) => t.tag)) || [],
-        stat: file.stat
-      })
-    );
-  }
-  async handleWriteFileLegacy(res, filePath, content) {
-    const folderPath = filePath.substring(0, filePath.lastIndexOf("/"));
-    if (folderPath) {
-      const folder = this.app.vault.getAbstractFileByPath(folderPath);
-      if (!folder) {
-        await this.app.vault.createFolder(folderPath);
-      }
-    }
-    const existingFile = this.app.vault.getAbstractFileByPath(filePath);
-    if (existingFile instanceof import_obsidian2.TFile) {
-      await this.app.vault.modify(existingFile, content);
-    } else {
-      await this.app.vault.create(filePath, content);
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ success: true, path: filePath }));
-  }
-  async handleAppendFileLegacy(res, filePath, content) {
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof import_obsidian2.TFile)) {
-      return this.handleWriteFileLegacy(res, filePath, content);
-    }
-    const existingContent = await this.app.vault.read(file);
-    const newContent = existingContent.endsWith("\n") ? existingContent + content : existingContent + "\n" + content;
-    await this.app.vault.modify(file, newContent);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ success: true, path: filePath }));
-  }
-  async handleDeleteFileLegacy(res, filePath) {
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof import_obsidian2.TFile)) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "File not found" }));
-      return;
-    }
-    await this.app.vault.delete(file);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ success: true }));
-  }
-  async handleSearch(res, query, contextLength) {
-    const results = [];
-    const search = (0, import_obsidian2.prepareSimpleSearch)(query);
-    for (const file of this.app.vault.getMarkdownFiles()) {
-      const content = await this.app.vault.cachedRead(file);
-      const result = search(content);
-      if (result) {
-        const matches = result.matches.map((match) => ({
-          start: match[0],
-          end: match[1],
-          context: content.slice(
-            Math.max(0, match[0] - contextLength),
-            match[1] + contextLength
-          )
-        }));
-        results.push({
-          path: file.path,
-          matches
-        });
-      }
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ results }));
-  }
-  handleGetActive(res) {
-    const file = this.app.workspace.getActiveFile();
-    if (!file) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "No active file" }));
-      return;
-    }
-    this.handleReadFileLegacy(res, file.path);
-  }
-  handleListCommands(res) {
-    const commands = Object.values(this.app.commands.commands).map((cmd) => ({
-      id: cmd.id,
-      name: cmd.name
-    }));
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ commands }));
-  }
-  handleExecuteCommand(res, commandId) {
-    const cmd = this.app.commands.commands[commandId];
-    if (!cmd) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Command not found" }));
-      return;
-    }
-    this.app.commands.executeCommandById(commandId);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ success: true }));
-  }
-  // ===========================================================================
-  // Knowledge Base Handlers
-  // ===========================================================================
-  async handleListKnowledgeBases(res) {
-    const kbs = await this.kbManager.listKnowledgeBases();
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ knowledge_bases: kbs }));
-  }
-  async handleAddKnowledgeBase(res, data) {
-    const kb = await this.kbManager.addKnowledgeBase(
-      data.name,
-      data.description,
-      data.subfolder,
-      data.organization_rules
-    );
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        knowledge_base: kb,
-        next_steps: "Knowledge base created. Please define folder constraints using add_knowledge_base_folder_constraint to specify machine-checkable metadata rules for notes under specific subfolders."
-      })
-    );
-  }
-  async handleUpdateKnowledgeBase(res, data) {
-    const kb = await this.kbManager.updateKnowledgeBase(data.name, {
-      description: data.description,
-      subfolder: data.subfolder,
-      organization_rules: data.organization_rules
-    });
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ knowledge_base: kb }));
-  }
-  async handleAddFolderConstraint(res, data) {
-    const schemaValidation = validateConstraintRulesSchema(data.rules);
-    if (!schemaValidation.passed) {
-      const error = {
-        code: "schema_validation_failed",
-        message: "Invalid constraint rules schema",
-        details: schemaValidation.issues
+      return { jsonrpc: "2.0", id, result };
+    } catch (error) {
+      return {
+        jsonrpc: "2.0",
+        id,
+        error: { code: -32e3, message: error instanceof Error ? error.message : String(error) }
       };
-      res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
     }
-    const constraint = await this.kbManager.addFolderConstraint(
-      data.kb_name,
-      data.subfolder,
-      data.rules
-    );
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ folder_constraint: constraint }));
   }
-  // ===========================================================================
-  // Note Handlers (KB-scoped with validation)
-  // ===========================================================================
-  async handleListNotes(res, kbName, subfolder) {
-    const kb = await this.kbManager.getKnowledgeBase(kbName);
-    if (!kb) {
-      const error = {
-        code: "knowledge_base_not_found",
-        message: `Knowledge base '${kbName}' not found`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const searchPath = subfolder ? this.kbManager.resolveNotePath(kb, subfolder) : kb.subfolder;
-    const notes = [];
-    const collectNotes = (folder2) => {
-      for (const child of folder2.children) {
-        if (child instanceof import_obsidian2.TFile && child.extension === "md") {
-          notes.push({ path: child.path });
-        } else if (child instanceof import_obsidian2.TFolder) {
-          collectNotes(child);
-        }
-      }
-    };
-    const folder = this.app.vault.getAbstractFileByPath(searchPath);
-    if (folder instanceof import_obsidian2.TFolder) {
-      collectNotes(folder);
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        knowledge_base: { name: kb.name, subfolder: kb.subfolder },
-        notes
-      })
-    );
-  }
-  async handleCreateNote(res, data) {
-    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
-    if (!kb) {
-      const error = {
-        code: "knowledge_base_not_found",
-        message: `Knowledge base '${data.knowledge_base_name}' not found`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
-    if (this.kbManager.noteExists(resolvedPath)) {
-      const error = {
-        code: "note_already_exists",
-        message: `Note already exists at '${resolvedPath}'`
-      };
-      res.writeHead(409, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const constraints = await this.kbManager.getFolderConstraints(kb.name);
-    const constraint = findApplicableConstraint(resolvedPath, constraints);
-    let validation = { passed: true, issues: [] };
-    if (constraint) {
-      validation = validateNote(resolvedPath, data.note_content, constraint);
-      if (!validation.passed) {
-        const error = {
-          code: "folder_constraint_violation",
-          message: "Note does not satisfy folder constraint requirements",
-          constraint: {
-            kb_name: constraint.kb_name,
-            subfolder: constraint.subfolder
+  getMCPTools() {
+    return [
+      // Knowledge Base Management
+      {
+        name: "list_knowledge_bases",
+        description: "List all defined Knowledge Bases in the vault",
+        inputSchema: { type: "object", properties: {}, required: [] }
+      },
+      {
+        name: "add_knowledge_base",
+        description: "Create a new Knowledge Base",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Unique name for the KB" },
+            description: { type: "string", description: "Human-readable description" },
+            subfolder: { type: "string", description: "Root folder path" },
+            organization_rules: { type: "string", description: "Organization rules (natural language)" }
           },
-          issues: validation.issues
-        };
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error }));
-        return;
+          required: ["name", "description", "subfolder"]
+        }
+      },
+      {
+        name: "update_knowledge_base",
+        description: "Update an existing Knowledge Base configuration",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Name of the KB to update" },
+            description: { type: "string", description: "New description" },
+            subfolder: { type: "string", description: "New root folder path" },
+            organization_rules: { type: "string", description: "New organization rules" }
+          },
+          required: ["name"]
+        }
+      },
+      {
+        name: "add_knowledge_base_folder_constraint",
+        description: "Add folder-specific validation rules to a Knowledge Base",
+        inputSchema: {
+          type: "object",
+          properties: {
+            kb_name: { type: "string", description: "Knowledge Base name" },
+            subfolder: { type: "string", description: "Subfolder within KB" },
+            rules: { type: "object", description: "Constraint rules (required_frontmatter_fields, etc.)" }
+          },
+          required: ["kb_name", "subfolder", "rules"]
+        }
+      },
+      // Note Operations
+      {
+        name: "list_notes",
+        description: "List all notes in a Knowledge Base",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: { type: "string" },
+            subfolder: { type: "string", description: "Optional subfolder within KB" }
+          },
+          required: ["knowledge_base_name"]
+        }
+      },
+      {
+        name: "create_note",
+        description: "Create a new note with validation",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: { type: "string" },
+            note_path: { type: "string" },
+            note_content: { type: "string" }
+          },
+          required: ["knowledge_base_name", "note_path", "note_content"]
+        }
+      },
+      {
+        name: "read_note",
+        description: "Read a note's content",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: { type: "string" },
+            note_path: { type: "string" },
+            offset: { type: "number" },
+            limit: { type: "number" }
+          },
+          required: ["knowledge_base_name", "note_path"]
+        }
+      },
+      {
+        name: "update_note",
+        description: "Update an existing note",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: { type: "string" },
+            note_path: { type: "string" },
+            note_content: { type: "string" }
+          },
+          required: ["knowledge_base_name", "note_path", "note_content"]
+        }
+      },
+      {
+        name: "append_note",
+        description: "Append content to an existing note",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: { type: "string" },
+            note_path: { type: "string" },
+            note_content: { type: "string" }
+          },
+          required: ["knowledge_base_name", "note_path", "note_content"]
+        }
+      },
+      {
+        name: "move_note",
+        description: "Move a note to a different location",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: { type: "string" },
+            origin_note_path: { type: "string" },
+            new_note_path: { type: "string" }
+          },
+          required: ["knowledge_base_name", "origin_note_path", "new_note_path"]
+        }
+      },
+      {
+        name: "delete_note",
+        description: "Delete a note",
+        inputSchema: {
+          type: "object",
+          properties: {
+            knowledge_base_name: { type: "string" },
+            note_path: { type: "string" }
+          },
+          required: ["knowledge_base_name", "note_path"]
+        }
+      },
+      // Vault Operations
+      {
+        name: "list_vault_files",
+        description: "List files in the vault",
+        inputSchema: {
+          type: "object",
+          properties: { path: { type: "string", description: "Folder path (optional)" } },
+          required: []
+        }
+      },
+      {
+        name: "search_vault",
+        description: "Search text across all notes",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            context_length: { type: "number", default: 100 }
+          },
+          required: ["query"]
+        }
+      },
+      {
+        name: "get_active_note",
+        description: "Get the currently open note",
+        inputSchema: { type: "object", properties: {}, required: [] }
+      },
+      // Commands
+      {
+        name: "list_commands",
+        description: "List available Obsidian commands",
+        inputSchema: { type: "object", properties: {}, required: [] }
+      },
+      {
+        name: "execute_command",
+        description: "Execute an Obsidian command",
+        inputSchema: {
+          type: "object",
+          properties: { command_id: { type: "string" } },
+          required: ["command_id"]
+        }
       }
-    }
-    const folderPath = resolvedPath.substring(0, resolvedPath.lastIndexOf("/"));
-    if (folderPath) {
-      await this.ensureFolder(folderPath);
-    }
-    await this.app.vault.create(resolvedPath, data.note_content);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        knowledge_base: kb,
-        note: {
-          path: resolvedPath,
-          content: data.note_content
-        },
-        machine_validation: validation,
-        validation_instruction_for_llm: VALIDATION_INSTRUCTIONS.create_note
-      })
-    );
+    ];
   }
-  async handleReadNote(res, data) {
-    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
-    if (!kb) {
-      const error = {
-        code: "knowledge_base_not_found",
-        message: `Knowledge base '${data.knowledge_base_name}' not found`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
-    const file = this.app.vault.getAbstractFileByPath(resolvedPath);
-    if (!(file instanceof import_obsidian2.TFile)) {
-      const error = {
-        code: "note_not_found",
-        message: `Note not found at '${resolvedPath}'`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const fullContent = await this.app.vault.read(file);
-    const offset = data.offset || 0;
-    const limit = data.limit || DEFAULT_READ_LIMIT;
-    const chunk = fullContent.slice(offset, offset + limit);
-    const hasMore = offset + limit < fullContent.length;
-    const remainingChars = Math.max(0, fullContent.length - (offset + limit));
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        knowledge_base: kb,
-        note: {
+  getMCPResources() {
+    return [
+      {
+        uri: "obsidian://vault",
+        name: "Vault Info",
+        description: "Current vault information",
+        mimeType: "application/json"
+      },
+      {
+        uri: "obsidian://knowledge-bases",
+        name: "Knowledge Bases",
+        description: "All defined Knowledge Bases",
+        mimeType: "application/json"
+      }
+    ];
+  }
+  async handleMCPToolCall(params) {
+    const { name, arguments: args } = params;
+    let result;
+    switch (name) {
+      case "list_knowledge_bases": {
+        const kbs = await this.kbManager.listKnowledgeBases();
+        result = { knowledge_bases: kbs };
+        break;
+      }
+      case "add_knowledge_base": {
+        const kb = await this.kbManager.addKnowledgeBase(
+          args.name,
+          args.description,
+          args.subfolder,
+          args.organization_rules || ""
+        );
+        result = { knowledge_base: kb };
+        break;
+      }
+      case "update_knowledge_base": {
+        const kb = await this.kbManager.updateKnowledgeBase(args.name, {
+          description: args.description,
+          subfolder: args.subfolder,
+          organization_rules: args.organization_rules
+        });
+        result = { knowledge_base: kb };
+        break;
+      }
+      case "add_knowledge_base_folder_constraint": {
+        const schemaValidation = validateConstraintRulesSchema(args.rules);
+        if (!schemaValidation.passed) {
+          throw new Error(`Invalid constraint rules: ${schemaValidation.issues.map((i) => i.message).join(", ")}`);
+        }
+        const constraint = await this.kbManager.addFolderConstraint(
+          args.kb_name,
+          args.subfolder,
+          args.rules
+        );
+        result = { folder_constraint: constraint };
+        break;
+      }
+      case "list_notes": {
+        const kb = await this.kbManager.getKnowledgeBase(args.knowledge_base_name);
+        if (!kb)
+          throw new Error(`Knowledge base '${args.knowledge_base_name}' not found`);
+        const searchPath = args.subfolder ? this.kbManager.resolveNotePath(kb, args.subfolder) : kb.subfolder;
+        const notes = [];
+        const folder = this.app.vault.getAbstractFileByPath(searchPath);
+        if (folder instanceof import_obsidian2.TFolder) {
+          const collectNotes = (f) => {
+            for (const child of f.children) {
+              if (child instanceof import_obsidian2.TFile && child.extension === "md") {
+                notes.push({ path: child.path });
+              } else if (child instanceof import_obsidian2.TFolder) {
+                collectNotes(child);
+              }
+            }
+          };
+          collectNotes(folder);
+        }
+        result = { knowledge_base: kb, notes };
+        break;
+      }
+      case "create_note": {
+        const kb = await this.kbManager.getKnowledgeBase(args.knowledge_base_name);
+        if (!kb)
+          throw new Error(`Knowledge base '${args.knowledge_base_name}' not found`);
+        const resolvedPath = this.kbManager.resolveNotePath(kb, args.note_path);
+        if (this.kbManager.noteExists(resolvedPath)) {
+          throw new Error(`Note already exists at '${resolvedPath}'`);
+        }
+        const constraints = await this.kbManager.getFolderConstraints(kb.name);
+        const constraint = findApplicableConstraint(resolvedPath, constraints);
+        let validation = { passed: true, issues: [] };
+        if (constraint) {
+          validation = validateNote(resolvedPath, args.note_content, constraint);
+          if (!validation.passed) {
+            throw new Error(`Validation failed: ${validation.issues.map((i) => i.message).join(", ")}`);
+          }
+        }
+        const folderPath = resolvedPath.substring(0, resolvedPath.lastIndexOf("/"));
+        if (folderPath)
+          await this.ensureFolder(folderPath);
+        await this.app.vault.create(resolvedPath, args.note_content);
+        result = { path: resolvedPath, validation };
+        break;
+      }
+      case "read_note": {
+        const kb = await this.kbManager.getKnowledgeBase(args.knowledge_base_name);
+        if (!kb)
+          throw new Error(`Knowledge base '${args.knowledge_base_name}' not found`);
+        const resolvedPath = this.kbManager.resolveNotePath(kb, args.note_path);
+        const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+        if (!(file instanceof import_obsidian2.TFile))
+          throw new Error(`Note not found at '${resolvedPath}'`);
+        const content = await this.app.vault.read(file);
+        const offset = args.offset || 0;
+        const limit = args.limit || DEFAULT_READ_LIMIT;
+        const chunk = content.slice(offset, offset + limit);
+        result = {
           path: resolvedPath,
           content: chunk,
           offset,
-          next_offset: offset + chunk.length,
-          has_more: hasMore,
-          remaining_chars: remainingChars
+          has_more: offset + limit < content.length
+        };
+        break;
+      }
+      case "update_note": {
+        const kb = await this.kbManager.getKnowledgeBase(args.knowledge_base_name);
+        if (!kb)
+          throw new Error(`Knowledge base '${args.knowledge_base_name}' not found`);
+        const resolvedPath = this.kbManager.resolveNotePath(kb, args.note_path);
+        const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+        if (!(file instanceof import_obsidian2.TFile))
+          throw new Error(`Note not found at '${resolvedPath}'`);
+        const constraints = await this.kbManager.getFolderConstraints(kb.name);
+        const constraint = findApplicableConstraint(resolvedPath, constraints);
+        if (constraint) {
+          const validation = validateNote(resolvedPath, args.note_content, constraint);
+          if (!validation.passed) {
+            throw new Error(`Validation failed: ${validation.issues.map((i) => i.message).join(", ")}`);
+          }
         }
-      })
-    );
-  }
-  async handleUpdateNote(res, data) {
-    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
-    if (!kb) {
-      const error = {
-        code: "knowledge_base_not_found",
-        message: `Knowledge base '${data.knowledge_base_name}' not found`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
-    const file = this.app.vault.getAbstractFileByPath(resolvedPath);
-    if (!(file instanceof import_obsidian2.TFile)) {
-      const error = {
-        code: "note_not_found",
-        message: `Note not found at '${resolvedPath}'`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const originalContent = await this.app.vault.read(file);
-    const constraints = await this.kbManager.getFolderConstraints(kb.name);
-    const constraint = findApplicableConstraint(resolvedPath, constraints);
-    let validation = { passed: true, issues: [] };
-    if (constraint) {
-      validation = validateNote(resolvedPath, data.note_content, constraint);
-      if (!validation.passed) {
-        const error = {
-          code: "folder_constraint_violation",
-          message: "Note does not satisfy folder constraint requirements",
-          constraint: {
-            kb_name: constraint.kb_name,
-            subfolder: constraint.subfolder
-          },
-          issues: validation.issues
-        };
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error }));
-        return;
+        await this.app.vault.modify(file, args.note_content);
+        result = { path: resolvedPath, success: true };
+        break;
       }
-    }
-    await this.app.vault.modify(file, data.note_content);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        knowledge_base: kb,
-        original_note: {
-          path: resolvedPath,
-          content: originalContent
-        },
-        updated_note: {
-          path: resolvedPath,
-          content: data.note_content
-        },
-        machine_validation: validation,
-        validation_instruction_for_llm: VALIDATION_INSTRUCTIONS.update_note
-      })
-    );
-  }
-  async handleAppendNote(res, data) {
-    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
-    if (!kb) {
-      const error = {
-        code: "knowledge_base_not_found",
-        message: `Knowledge base '${data.knowledge_base_name}' not found`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
-    const file = this.app.vault.getAbstractFileByPath(resolvedPath);
-    if (!(file instanceof import_obsidian2.TFile)) {
-      const error = {
-        code: "note_not_found",
-        message: `Note not found at '${resolvedPath}'`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const originalContent = await this.app.vault.read(file);
-    const newContent = originalContent.endsWith("\n") ? originalContent + data.note_content : originalContent + "\n" + data.note_content;
-    const constraints = await this.kbManager.getFolderConstraints(kb.name);
-    const constraint = findApplicableConstraint(resolvedPath, constraints);
-    let validation = { passed: true, issues: [] };
-    if (constraint) {
-      validation = validateNote(resolvedPath, newContent, constraint);
-      if (!validation.passed) {
-        const error = {
-          code: "folder_constraint_violation",
-          message: "Note does not satisfy folder constraint requirements",
-          constraint: {
-            kb_name: constraint.kb_name,
-            subfolder: constraint.subfolder
-          },
-          issues: validation.issues
-        };
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error }));
-        return;
+      case "append_note": {
+        const kb = await this.kbManager.getKnowledgeBase(args.knowledge_base_name);
+        if (!kb)
+          throw new Error(`Knowledge base '${args.knowledge_base_name}' not found`);
+        const resolvedPath = this.kbManager.resolveNotePath(kb, args.note_path);
+        const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+        if (!(file instanceof import_obsidian2.TFile))
+          throw new Error(`Note not found at '${resolvedPath}'`);
+        const existingContent = await this.app.vault.read(file);
+        const newContent = existingContent.endsWith("\n") ? existingContent + args.note_content : existingContent + "\n" + args.note_content;
+        const constraints = await this.kbManager.getFolderConstraints(kb.name);
+        const constraint = findApplicableConstraint(resolvedPath, constraints);
+        if (constraint) {
+          const validation = validateNote(resolvedPath, newContent, constraint);
+          if (!validation.passed) {
+            throw new Error(`Validation failed: ${validation.issues.map((i) => i.message).join(", ")}`);
+          }
+        }
+        await this.app.vault.modify(file, newContent);
+        result = { path: resolvedPath, success: true };
+        break;
       }
-    }
-    await this.app.vault.modify(file, newContent);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        knowledge_base: kb,
-        original_note: {
-          path: resolvedPath,
-          content: originalContent
-        },
-        updated_note: {
-          path: resolvedPath,
-          content: newContent
-        },
-        machine_validation: validation,
-        validation_instruction_for_llm: VALIDATION_INSTRUCTIONS.append_note
-      })
-    );
-  }
-  async handleMoveNote(res, data) {
-    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
-    if (!kb) {
-      const error = {
-        code: "knowledge_base_not_found",
-        message: `Knowledge base '${data.knowledge_base_name}' not found`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const originPath = this.kbManager.resolveNotePath(kb, data.origin_note_path);
-    const newPath = this.kbManager.resolveNotePath(kb, data.new_note_path);
-    const originFile = this.app.vault.getAbstractFileByPath(originPath);
-    if (!(originFile instanceof import_obsidian2.TFile)) {
-      const error = {
-        code: "note_not_found",
-        message: `Note not found at '${originPath}'`
-      };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    if (this.kbManager.noteExists(newPath)) {
-      const error = {
-        code: "note_already_exists",
-        message: `Note already exists at '${newPath}'`
-      };
-      res.writeHead(409, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
-    }
-    const content = await this.app.vault.read(originFile);
-    const constraints = await this.kbManager.getFolderConstraints(kb.name);
-    const constraint = findApplicableConstraint(newPath, constraints);
-    let validation = { passed: true, issues: [] };
-    if (constraint) {
-      validation = validateNote(newPath, content, constraint);
-      if (!validation.passed) {
-        const error = {
-          code: "folder_constraint_violation",
-          message: "Note does not satisfy folder constraint requirements for new location",
-          constraint: {
-            kb_name: constraint.kb_name,
-            subfolder: constraint.subfolder
-          },
-          issues: validation.issues
-        };
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error }));
-        return;
+      case "move_note": {
+        const kb = await this.kbManager.getKnowledgeBase(args.knowledge_base_name);
+        if (!kb)
+          throw new Error(`Knowledge base '${args.knowledge_base_name}' not found`);
+        const originPath = this.kbManager.resolveNotePath(kb, args.origin_note_path);
+        const newPath = this.kbManager.resolveNotePath(kb, args.new_note_path);
+        const originFile = this.app.vault.getAbstractFileByPath(originPath);
+        if (!(originFile instanceof import_obsidian2.TFile))
+          throw new Error(`Note not found at '${originPath}'`);
+        if (this.kbManager.noteExists(newPath)) {
+          throw new Error(`Note already exists at '${newPath}'`);
+        }
+        const content = await this.app.vault.read(originFile);
+        const constraints = await this.kbManager.getFolderConstraints(kb.name);
+        const constraint = findApplicableConstraint(newPath, constraints);
+        if (constraint) {
+          const validation = validateNote(newPath, content, constraint);
+          if (!validation.passed) {
+            throw new Error(`Validation failed for new location: ${validation.issues.map((i) => i.message).join(", ")}`);
+          }
+        }
+        const newFolderPath = newPath.substring(0, newPath.lastIndexOf("/"));
+        if (newFolderPath)
+          await this.ensureFolder(newFolderPath);
+        await this.app.vault.rename(originFile, newPath);
+        result = { origin_path: originPath, new_path: newPath };
+        break;
       }
+      case "delete_note": {
+        const kb = await this.kbManager.getKnowledgeBase(args.knowledge_base_name);
+        if (!kb)
+          throw new Error(`Knowledge base '${args.knowledge_base_name}' not found`);
+        const resolvedPath = this.kbManager.resolveNotePath(kb, args.note_path);
+        const file = this.app.vault.getAbstractFileByPath(resolvedPath);
+        if (!(file instanceof import_obsidian2.TFile))
+          throw new Error(`Note not found at '${resolvedPath}'`);
+        await this.app.vault.delete(file);
+        result = { deleted_path: resolvedPath };
+        break;
+      }
+      case "list_vault_files": {
+        const files = [];
+        const folderPath = args.path || "";
+        const listRecursive = (folder) => {
+          for (const child of folder.children) {
+            if (child instanceof import_obsidian2.TFile)
+              files.push(child.path);
+            else if (child instanceof import_obsidian2.TFolder)
+              files.push(child.path + "/");
+          }
+        };
+        if (folderPath) {
+          const folder = this.app.vault.getAbstractFileByPath(folderPath);
+          if (folder instanceof import_obsidian2.TFolder)
+            listRecursive(folder);
+        } else {
+          listRecursive(this.app.vault.getRoot());
+        }
+        result = { files };
+        break;
+      }
+      case "search_vault": {
+        const search = (0, import_obsidian2.prepareSimpleSearch)(args.query);
+        const contextLength = args.context_length || 100;
+        const results = [];
+        for (const file of this.app.vault.getMarkdownFiles()) {
+          const content = await this.app.vault.cachedRead(file);
+          const searchResult = search(content);
+          if (searchResult) {
+            results.push({
+              path: file.path,
+              matches: searchResult.matches.map((m) => ({
+                context: content.slice(Math.max(0, m[0] - contextLength), m[1] + contextLength)
+              }))
+            });
+          }
+        }
+        result = { results };
+        break;
+      }
+      case "get_active_note": {
+        const file = this.app.workspace.getActiveFile();
+        if (!file)
+          throw new Error("No active file");
+        const content = await this.app.vault.read(file);
+        result = { path: file.path, content };
+        break;
+      }
+      case "list_commands": {
+        const commands = Object.values(this.app.commands.commands).map((c) => ({
+          id: c.id,
+          name: c.name
+        }));
+        result = { commands };
+        break;
+      }
+      case "execute_command": {
+        const cmdId = args.command_id;
+        if (!this.app.commands.commands[cmdId]) {
+          throw new Error(`Command not found: ${cmdId}`);
+        }
+        this.app.commands.executeCommandById(cmdId);
+        result = { success: true };
+        break;
+      }
+      default:
+        throw new Error(`Unknown tool: ${name}`);
     }
-    const newFolderPath = newPath.substring(0, newPath.lastIndexOf("/"));
-    if (newFolderPath) {
-      await this.ensureFolder(newFolderPath);
-    }
-    await this.app.vault.rename(originFile, newPath);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        knowledge_base: kb,
-        origin_path: originPath,
-        new_path: newPath,
-        machine_validation: validation,
-        validation_instruction_for_llm: VALIDATION_INSTRUCTIONS.move_note
-      })
-    );
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
-  async handleDeleteNote(res, data) {
-    const kb = await this.kbManager.getKnowledgeBase(data.knowledge_base_name);
-    if (!kb) {
-      const error = {
-        code: "knowledge_base_not_found",
-        message: `Knowledge base '${data.knowledge_base_name}' not found`
+  async handleMCPResourceRead(params) {
+    const { uri } = params;
+    if (uri === "obsidian://vault") {
+      return {
+        contents: [{
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify({
+            name: this.app.vault.getName(),
+            files: this.app.vault.getMarkdownFiles().length
+          })
+        }]
       };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
     }
-    const resolvedPath = this.kbManager.resolveNotePath(kb, data.note_path);
-    const file = this.app.vault.getAbstractFileByPath(resolvedPath);
-    if (!(file instanceof import_obsidian2.TFile)) {
-      const error = {
-        code: "note_not_found",
-        message: `Note not found at '${resolvedPath}'`
+    if (uri === "obsidian://knowledge-bases") {
+      const kbs = await this.kbManager.listKnowledgeBases();
+      return {
+        contents: [{
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify({ knowledge_bases: kbs })
+        }]
       };
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error }));
-      return;
     }
-    await this.app.vault.delete(file);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        knowledge_base: { name: kb.name, subfolder: kb.subfolder },
-        deleted_path: resolvedPath
-      })
-    );
+    throw new Error(`Unknown resource: ${uri}`);
   }
   // ===========================================================================
   // Utility Methods
@@ -1712,11 +1608,9 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
     const config = {
       mcpServers: {
         obsidian: {
-          command: "npx",
-          args: ["-y", "obsidian-llm-bridges"],
-          env: {
-            OBSIDIAN_API_URL: `http://127.0.0.1:${this.settings.port}`,
-            OBSIDIAN_API_KEY: this.settings.apiKey
+          url: `http://127.0.0.1:${this.settings.port}/sse`,
+          headers: {
+            Authorization: `Bearer ${this.settings.apiKey}`
           }
         }
       }
@@ -1736,9 +1630,9 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     containerEl.createEl("h2", { text: "LLM Bridges Settings" });
     const statusEl = containerEl.createEl("div", { cls: "llm-bridges-status" });
     statusEl.createEl("p", {
-      text: `Server running on http://127.0.0.1:${this.plugin.settings.port}`
+      text: `MCP Server running on http://127.0.0.1:${this.plugin.settings.port}`
     });
-    new import_obsidian2.Setting(containerEl).setName("API Key").setDesc("Used to authenticate requests to the server").addText(
+    new import_obsidian2.Setting(containerEl).setName("API Key").setDesc("Used to authenticate MCP requests (Bearer token)").addText(
       (text) => text.setValue(this.plugin.settings.apiKey).setDisabled(true)
     ).addButton(
       (btn) => btn.setButtonText("Copy").onClick(() => {
@@ -1753,7 +1647,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
         new import_obsidian2.Notice("API Key regenerated!");
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("Port").setDesc("Port for the HTTP server (requires restart)").addText(
+    new import_obsidian2.Setting(containerEl).setName("Port").setDesc("Port for the MCP SSE server (requires restart)").addText(
       (text) => text.setValue(String(this.plugin.settings.port)).onChange(async (value) => {
         const port = parseInt(value);
         if (!isNaN(port) && port > 0 && port < 65536) {
@@ -1767,7 +1661,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
         this.plugin.restartServer();
       })
     );
-    containerEl.createEl("h3", { text: "Claude Setup" });
+    containerEl.createEl("h3", { text: "Claude Desktop Setup" });
     const instructionsEl = containerEl.createEl("div");
     instructionsEl.createEl("p", {
       text: "Add this to your Claude Desktop configuration:"
@@ -1778,11 +1672,9 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     configEl.setText(`{
   "mcpServers": {
     "obsidian": {
-      "command": "npx",
-      "args": ["-y", "obsidian-llm-bridges"],
-      "env": {
-        "OBSIDIAN_API_URL": "http://127.0.0.1:${this.plugin.settings.port}",
-        "OBSIDIAN_API_KEY": "${this.plugin.settings.apiKey}"
+      "url": "http://127.0.0.1:${this.plugin.settings.port}/sse",
+      "headers": {
+        "Authorization": "Bearer ${this.plugin.settings.apiKey}"
       }
     }
   }

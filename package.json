@@ -1,17 +1,12 @@
 {
   "name": "obsidian-llm-bridges",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Bridge your Obsidian vault with LLMs like ChatGPT and Claude",
   "type": "module",
   "main": "main.js",
-  "bin": {
-    "obsidian-mcp": "./dist/mcp-server.js"
-  },
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "build:mcp": "node esbuild.mcp.config.mjs",
-    "build:all": "npm run build && npm run build:mcp",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -29,9 +24,6 @@
   ],
   "author": "bincyan",
   "license": "MIT",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
-  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^5.29.0",
