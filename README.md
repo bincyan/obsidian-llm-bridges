@@ -10,6 +10,7 @@ Use your existing ChatGPT Plus or Claude Pro subscription to:
 - **Write** and create new content directly
 - **Search** across your knowledge base
 - **Execute** Obsidian commands remotely
+- **Manage** Knowledge Bases with validation rules
 - **Automate** workflows with your notes
 
 No separate API keys needed. Just your existing subscription.
@@ -17,25 +18,51 @@ No separate API keys needed. Just your existing subscription.
 ## How It Works
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   ChatGPT /     │────▶│  MCP Server      │────▶│  LLM Bridges    │────▶ Obsidian Vault
-│   Claude        │◀────│  (npx)           │◀────│  (this plugin)  │◀────
-└─────────────────┘     └──────────────────┘     └─────────────────┘
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   ChatGPT /     │────▶│  MCP Server      │────▶│  Reverse Proxy  │────▶│  LLM Bridges    │────▶ Obsidian
+│   Claude        │◀────│  (npx)           │◀────│  (HTTPS)        │◀────│  (this plugin)  │◀────  Vault
+└─────────────────┘     └──────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
-The plugin runs a local HTTP server inside Obsidian that exposes vault operations. The MCP server (run via npx) connects Claude to this local server.
+The plugin runs a local HTTP server inside Obsidian that exposes vault operations. A reverse proxy (e.g., Nginx, Caddy) provides HTTPS termination for secure connections. The MCP server (run via npx) connects Claude to the proxy endpoint.
+
+> **Note**: HTTPS is not provided by this repo directly. You need to configure your own reverse proxy with SSL certificates for production use.
 
 ## MCP Tools Available
+
+### Knowledge Base Management
+
+| Tool | Description |
+|------|-------------|
+| `list_knowledge_bases` | List all knowledge bases in the vault |
+| `add_knowledge_base` | Create a new knowledge base with validation rules |
+| `update_knowledge_base` | Update an existing knowledge base configuration |
+| `add_knowledge_base_folder_constraint` | Add folder-specific validation rules to a KB |
+
+### Note Operations (KB-aware)
+
+| Tool | Description |
+|------|-------------|
+| `list_notes` | List notes within a knowledge base |
+| `create_note` | Create a new note with validation |
+| `read_note` | Read note content, frontmatter, and tags |
+| `update_note` | Update an existing note with validation |
+| `append_note` | Append content to an existing note |
+| `move_note` | Move a note to a different location |
+| `delete_note` | Delete a note from the vault |
+
+### Vault Operations
 
 | Tool | Description |
 |------|-------------|
 | `list_vault_files` | List files and folders in the vault |
-| `read_note` | Read content, frontmatter, and tags |
-| `write_note` | Create or overwrite a note |
-| `append_to_note` | Append content to existing note |
-| `delete_note` | Delete a note |
 | `search_vault` | Search text across all notes |
-| `get_active_note` | Get currently open note |
+| `get_active_note` | Get the currently open note in Obsidian |
+
+### Command Execution
+
+| Tool | Description |
+|------|-------------|
 | `list_commands` | List available Obsidian commands |
 | `execute_command` | Execute an Obsidian command |
 
@@ -62,12 +89,57 @@ After installing, enable the plugin in Obsidian. It will automatically:
 - Generate an API key
 - Start the local server on port 27124
 
-### 2. Configure Claude Desktop
+### 2. (Optional) Configure Reverse Proxy for HTTPS
+
+For secure connections, set up a reverse proxy with HTTPS. Example with Caddy:
+
+```
+obsidian.localhost {
+    reverse_proxy 127.0.0.1:27124
+}
+```
+
+Or with Nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name obsidian.localhost;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:27124;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+### 3. Configure Claude Desktop
 
 Add the MCP server to your Claude configuration file:
 
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "npx",
+      "args": ["-y", "obsidian-llm-bridges"],
+      "env": {
+        "OBSIDIAN_API_URL": "https://obsidian.localhost",
+        "OBSIDIAN_API_KEY": "YOUR_API_KEY_HERE"
+      }
+    }
+  }
+}
+```
+
+For local development without HTTPS:
 
 ```json
 {
@@ -86,14 +158,16 @@ Add the MCP server to your Claude configuration file:
 
 **Tip**: Use the "Copy MCP Configuration" button in the plugin settings to get the config with your actual API key.
 
-### 3. Restart Claude Desktop
+### 4. Restart Claude Desktop
 
 Close and reopen Claude Desktop to load the MCP server.
 
-### 4. Start Using
+### 5. Start Using
 
 You can now ask Claude to:
 
+- "List all knowledge bases in my vault"
+- "Create a new knowledge base for my projects"
 - "List all notes in my vault"
 - "Read my daily note"
 - "Create a new note called 'Meeting Notes' with today's agenda"
@@ -114,12 +188,14 @@ Open the plugin settings in Obsidian to:
 - Obsidian v0.15.0+
 - Claude Pro subscription (for Claude integration)
 - Node.js 18+ (for running the MCP server via npx)
+- (Optional) Reverse proxy with SSL for HTTPS connections
 
 ## Security
 
 - Server runs locally on 127.0.0.1 only
 - All requests require API key authentication
 - No data leaves your machine except to the LLM you're using
+- HTTPS encryption available via reverse proxy
 - You control what the LLM can access
 
 ## Development
@@ -145,6 +221,19 @@ npm run build:mcp
 npm run build:all
 ```
 
+### Test
+
+```bash
+# Run all tests
+npm test
+
+# Run tests in watch mode
+npm run test:watch
+
+# Run tests with coverage
+npm run test:coverage
+```
+
 ### Development Mode
 
 ```bash
@@ -157,7 +246,15 @@ npm run dev
 obsidian-llm-bridges/
 ├── src/
 │   ├── main.ts          # Obsidian plugin (HTTP server)
-│   └── mcp-server.ts    # MCP server for Claude
+│   ├── mcp-server.ts    # MCP server for Claude
+│   ├── types.ts         # TypeScript type definitions
+│   ├── validation.ts    # Knowledge Base validation engine
+│   └── kb-manager.ts    # Knowledge Base management
+├── tests/
+│   ├── unit/            # Unit tests
+│   ├── integration/     # Integration tests
+│   └── mocks/           # Mock Obsidian API
+├── spec/                # Specification documents
 ├── dist/
 │   └── mcp-server.js    # Built MCP server
 ├── main.js              # Built Obsidian plugin
@@ -178,11 +275,16 @@ obsidian-llm-bridges/
 2. Check your `claude_desktop_config.json` syntax
 3. Make sure the API key matches
 4. Restart Claude Desktop
+5. If using HTTPS, verify your reverse proxy is running
 
 ### Test the connection
 
 ```bash
+# Direct connection (HTTP)
 curl -H "Authorization: Bearer YOUR_API_KEY" http://127.0.0.1:27124/
+
+# Via reverse proxy (HTTPS)
+curl -H "Authorization: Bearer YOUR_API_KEY" https://obsidian.localhost/
 ```
 
 Should return: `{"status":"ok","version":"1.0.0","vault":"Your Vault Name"}`
