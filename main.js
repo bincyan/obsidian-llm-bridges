@@ -1398,6 +1398,7 @@ function escapeHtml(str) {
 
 // src/main.ts
 var DEFAULT_SETTINGS = {
+  hostname: "127.0.0.1",
   port: 3100,
   apiKey: "",
   authMethod: "apiKey",
@@ -1474,7 +1475,7 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
   // MCP SSE Server with OAuth 2.1 Support
   // ===========================================================================
   getBaseUrl() {
-    return `http://127.0.0.1:${this.settings.port}`;
+    return `http://${this.settings.hostname}:${this.settings.port}`;
   }
   startServer() {
     if (this.server) {
@@ -1749,7 +1750,7 @@ data: ${JSON.stringify(response)}
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Not found" }));
     });
-    this.server.listen(this.settings.port, "127.0.0.1", () => {
+    this.server.listen(this.settings.port, this.settings.hostname, () => {
       console.log(`LLM Bridges MCP Server listening on ${this.getBaseUrl()}`);
       console.log(`Auth method: ${this.settings.authMethod}`);
     });
@@ -2396,7 +2397,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     containerEl.createEl("h2", { text: "LLM Bridges Settings" });
     const statusEl = containerEl.createEl("div", { cls: "llm-bridges-status" });
     statusEl.createEl("p", {
-      text: `MCP Server running on http://127.0.0.1:${this.plugin.settings.port}`
+      text: `MCP Server running on http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`
     });
     statusEl.createEl("p", {
       text: `Authentication: ${this.plugin.settings.authMethod === "oauth" ? "OAuth 2.1" : "API Key"}`,
@@ -2434,7 +2435,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
         text: "OAuth 2.1 is enabled. Claude Desktop will automatically authenticate using the OAuth flow.",
         cls: "setting-item-description"
       });
-      const baseUrl = `http://127.0.0.1:${this.plugin.settings.port}`;
+      const baseUrl = `http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`;
       const endpointsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-endpoints" });
       endpointsEl.createEl("h4", { text: "OAuth Endpoints" });
       const endpointsList = endpointsEl.createEl("ul");
@@ -2483,6 +2484,14 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
       }
     }
     containerEl.createEl("h3", { text: "Server" });
+    new import_obsidian2.Setting(containerEl).setName("Hostname").setDesc("Server hostname/IP to bind to (use 0.0.0.0 to listen on all interfaces)").addText(
+      (text) => text.setValue(this.plugin.settings.hostname).setPlaceholder("127.0.0.1").onChange(async (value) => {
+        if (value.trim()) {
+          this.plugin.settings.hostname = value.trim();
+          await this.plugin.saveSettings();
+        }
+      })
+    );
     new import_obsidian2.Setting(containerEl).setName("Port").setDesc("Port for the MCP SSE server (requires restart)").addText(
       (text) => text.setValue(String(this.plugin.settings.port)).onChange(async (value) => {
         const port = parseInt(value);
@@ -2505,11 +2514,12 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     const configEl = containerEl.createEl("pre", {
       cls: "llm-bridges-config"
     });
+    const serverUrl = `http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`;
     if (this.plugin.settings.authMethod === "oauth") {
       configEl.setText(`{
   "mcpServers": {
     "obsidian": {
-      "url": "http://127.0.0.1:${this.plugin.settings.port}/sse"
+      "url": "${serverUrl}/sse"
     }
   }
 }
@@ -2520,7 +2530,7 @@ the authorization endpoints and prompt you to authorize.`);
       configEl.setText(`{
   "mcpServers": {
     "obsidian": {
-      "url": "http://127.0.0.1:${this.plugin.settings.port}/sse",
+      "url": "${serverUrl}/sse",
       "headers": {
         "Authorization": "Bearer ${this.plugin.settings.apiKey}"
       }
