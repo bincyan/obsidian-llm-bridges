@@ -15,6 +15,10 @@ export interface OAuthClient {
   client_id: string;
   client_name: string;
   redirect_uris: string[];
+  grant_types: string[];
+  response_types: string[];
+  token_endpoint_auth_method: 'none' | 'client_secret_basic' | 'client_secret_post';
+  pkce_required: boolean;
   created_at: string;
   scope?: string;
 }
@@ -63,15 +67,19 @@ export const DEFAULT_OAUTH_SETTINGS: OAuthSettings = {
   authorization_code_lifetime: 600,
 };
 
-// Claude Desktop well-known client
+// Claude Desktop well-known client (per MCP Authorization Specification)
+// This is a PUBLIC client using PKCE - no client_secret required
 export const CLAUDE_DESKTOP_CLIENT: OAuthClient = {
   client_id: 'claude-desktop',
-  client_name: 'Claude Desktop',
+  client_name: 'Claude Desktop MCP Connector',
   redirect_uris: [
-    'http://localhost',
-    'http://127.0.0.1',
-    // Claude uses dynamic ports, so we'll validate the host only
+    'https://claude.ai/api/oauth/callback',  // Claude web callback (exact match required)
+    'claude://oauth/callback',                // Claude desktop app deep link (exact match required)
   ],
+  grant_types: ['authorization_code'],
+  response_types: ['code'],
+  token_endpoint_auth_method: 'none',  // Public client - no secret
+  pkce_required: true,                  // PKCE with S256 is mandatory
   created_at: new Date().toISOString(),
   scope: 'mcp:read mcp:write',
 };
@@ -174,17 +182,8 @@ export class OAuthManager {
     const client = this.getClient(clientId);
     if (!client) return false;
 
-    // For Claude Desktop, validate host only (dynamic ports)
-    if (clientId === 'claude-desktop') {
-      try {
-        const url = new URL(redirectUri);
-        return url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-      } catch {
-        return false;
-      }
-    }
-
-    // Exact match for other clients
+    // OAuth requires EXACT string match for redirect URIs (security requirement)
+    // No trailing slash differences, no port variations - must be identical
     return client.redirect_uris.includes(redirectUri);
   }
 

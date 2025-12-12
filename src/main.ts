@@ -57,6 +57,7 @@ interface MCPResponse {
 type AuthMethod = "apiKey" | "oauth";
 
 interface LLMBridgesSettings {
+  hostname: string;       // Server hostname (default: 127.0.0.1)
   port: number;           // MCP SSE server port
   apiKey: string;         // API key for authentication
   authMethod: AuthMethod; // Authentication method: API Key or OAuth 2.1
@@ -64,6 +65,7 @@ interface LLMBridgesSettings {
 }
 
 const DEFAULT_SETTINGS: LLMBridgesSettings = {
+  hostname: "127.0.0.1",
   port: 3100,
   apiKey: "",
   authMethod: "apiKey",
@@ -164,7 +166,7 @@ export default class LLMBridgesPlugin extends Plugin {
   // ===========================================================================
 
   private getBaseUrl(): string {
-    return `http://127.0.0.1:${this.settings.port}`;
+    return `http://${this.settings.hostname}:${this.settings.port}`;
   }
 
   startServer() {
@@ -519,7 +521,7 @@ export default class LLMBridgesPlugin extends Plugin {
       res.end(JSON.stringify({ error: "Not found" }));
     });
 
-    this.server.listen(this.settings.port, "127.0.0.1", () => {
+    this.server.listen(this.settings.port, this.settings.hostname, () => {
       console.log(`LLM Bridges MCP Server listening on ${this.getBaseUrl()}`);
       console.log(`Auth method: ${this.settings.authMethod}`);
     });
@@ -1257,7 +1259,7 @@ class LLMBridgesSettingTab extends PluginSettingTab {
     // Status
     const statusEl = containerEl.createEl("div", { cls: "llm-bridges-status" });
     statusEl.createEl("p", {
-      text: `MCP Server running on http://127.0.0.1:${this.plugin.settings.port}`,
+      text: `MCP Server running on http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`,
     });
     statusEl.createEl("p", {
       text: `Authentication: ${this.plugin.settings.authMethod === "oauth" ? "OAuth 2.1" : "API Key"}`,
@@ -1325,17 +1327,18 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       });
 
       // OAuth Endpoints Info
+      const baseUrl = `http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`;
       const endpointsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-endpoints" });
       endpointsEl.createEl("h4", { text: "OAuth Endpoints" });
       const endpointsList = endpointsEl.createEl("ul");
       endpointsList.createEl("li", {
-        text: `Authorization: http://127.0.0.1:${this.plugin.settings.port}/oauth/authorize`,
+        text: `Authorization: ${baseUrl}/oauth/authorize`,
       });
       endpointsList.createEl("li", {
-        text: `Token: http://127.0.0.1:${this.plugin.settings.port}/oauth/token`,
+        text: `Token: ${baseUrl}/oauth/token`,
       });
       endpointsList.createEl("li", {
-        text: `Metadata: http://127.0.0.1:${this.plugin.settings.port}/.well-known/oauth-authorization-server`,
+        text: `Metadata: ${baseUrl}/.well-known/oauth-authorization-server`,
       });
 
       // Token Lifetimes
@@ -1397,6 +1400,21 @@ class LLMBridgesSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "Server" });
 
     new Setting(containerEl)
+      .setName("Hostname")
+      .setDesc("Server hostname/IP to bind to (use 0.0.0.0 to listen on all interfaces)")
+      .addText((text) =>
+        text
+          .setValue(this.plugin.settings.hostname)
+          .setPlaceholder("127.0.0.1")
+          .onChange(async (value) => {
+            if (value.trim()) {
+              this.plugin.settings.hostname = value.trim();
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Port")
       .setDesc("Port for the MCP SSE server (requires restart)")
       .addText((text) =>
@@ -1434,11 +1452,12 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       cls: "llm-bridges-config",
     });
 
+    const serverUrl = `http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`;
     if (this.plugin.settings.authMethod === "oauth") {
       configEl.setText(`{
   "mcpServers": {
     "obsidian": {
-      "url": "http://127.0.0.1:${this.plugin.settings.port}/sse"
+      "url": "${serverUrl}/sse"
     }
   }
 }
@@ -1449,7 +1468,7 @@ the authorization endpoints and prompt you to authorize.`);
       configEl.setText(`{
   "mcpServers": {
     "obsidian": {
-      "url": "http://127.0.0.1:${this.plugin.settings.port}/sse",
+      "url": "${serverUrl}/sse",
       "headers": {
         "Authorization": "Bearer ${this.plugin.settings.apiKey}"
       }

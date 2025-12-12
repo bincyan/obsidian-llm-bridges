@@ -1,6 +1,7 @@
 # Build output
 # main.js  # Keep main.js tracked for BRAT compatibility
 *.js.map
+dist/
 
 # npm
 node_modules/
@@ -15,3 +16,9 @@ Thumbs.db
 
 # Obsidian
 data.json
+
+# Test coverage
+coverage/
+
+# Logs
+logs/
