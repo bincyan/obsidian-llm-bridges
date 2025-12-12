@@ -2549,5 +2549,10 @@ the authorization endpoints and prompt you to authorize.`);
     locationsEl.createEl("li", {
       text: "Windows: %APPDATA%\\Claude\\claude_desktop_config.json"
     });
+    const versionEl = containerEl.createEl("div", { cls: "llm-bridges-version" });
+    versionEl.createEl("p", {
+      text: `LLM Bridges v${this.plugin.manifest.version}`,
+      cls: "setting-item-description"
+    });
   }
 };
