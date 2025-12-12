@@ -1398,7 +1398,9 @@ function escapeHtml(str) {
 
 // src/main.ts
 var DEFAULT_SETTINGS = {
-  hostname: "127.0.0.1",
+  bindAddress: "127.0.0.1",
+  publicUrl: "",
+  // Empty means use http://{bindAddress}:{port}
   port: 3100,
   apiKey: "",
   authMethod: "apiKey",
@@ -1475,7 +1477,10 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
   // MCP SSE Server with OAuth 2.1 Support
   // ===========================================================================
   getBaseUrl() {
-    return `http://${this.settings.hostname}:${this.settings.port}`;
+    if (this.settings.publicUrl) {
+      return this.settings.publicUrl.replace(/\/$/, "");
+    }
+    return `http://${this.settings.bindAddress}:${this.settings.port}`;
   }
   startServer() {
     if (this.server) {
@@ -1750,8 +1755,9 @@ data: ${JSON.stringify(response)}
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Not found" }));
     });
-    this.server.listen(this.settings.port, this.settings.hostname, () => {
-      console.log(`LLM Bridges MCP Server listening on ${this.getBaseUrl()}`);
+    this.server.listen(this.settings.port, this.settings.bindAddress, () => {
+      console.log(`LLM Bridges MCP Server bound to ${this.settings.bindAddress}:${this.settings.port}`);
+      console.log(`Public URL: ${this.getBaseUrl()}`);
       console.log(`Auth method: ${this.settings.authMethod}`);
     });
     this.server.on("error", (err) => {
@@ -2397,8 +2403,13 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     containerEl.createEl("h2", { text: "LLM Bridges Settings" });
     const statusEl = containerEl.createEl("div", { cls: "llm-bridges-status" });
     statusEl.createEl("p", {
-      text: `MCP Server running on http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`
+      text: `Server bound to ${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`
     });
+    if (this.plugin.settings.publicUrl) {
+      statusEl.createEl("p", {
+        text: `Public URL: ${this.plugin.settings.publicUrl}`
+      });
+    }
     statusEl.createEl("p", {
       text: `Authentication: ${this.plugin.settings.authMethod === "oauth" ? "OAuth 2.1" : "API Key"}`,
       cls: "llm-bridges-auth-status"
@@ -2435,7 +2446,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
         text: "OAuth 2.1 is enabled. Claude Desktop will automatically authenticate using the OAuth flow.",
         cls: "setting-item-description"
       });
-      const baseUrl = `http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`;
+      const baseUrl = this.plugin.settings.publicUrl || `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`;
       const endpointsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-endpoints" });
       endpointsEl.createEl("h4", { text: "OAuth Endpoints" });
       const endpointsList = endpointsEl.createEl("ul");
@@ -2484,10 +2495,10 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
       }
     }
     containerEl.createEl("h3", { text: "Server" });
-    new import_obsidian2.Setting(containerEl).setName("Hostname").setDesc("Server hostname/IP to bind to (use 0.0.0.0 to listen on all interfaces)").addText(
-      (text) => text.setValue(this.plugin.settings.hostname).setPlaceholder("127.0.0.1").onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Bind Address").setDesc("IP address to bind server to (127.0.0.1 = local only, 0.0.0.0 = all interfaces)").addText(
+      (text) => text.setValue(this.plugin.settings.bindAddress).setPlaceholder("127.0.0.1").onChange(async (value) => {
         if (value.trim()) {
-          this.plugin.settings.hostname = value.trim();
+          this.plugin.settings.bindAddress = value.trim();
           await this.plugin.saveSettings();
         }
       })
@@ -2499,6 +2510,12 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
           this.plugin.settings.port = port;
           await this.plugin.saveSettings();
         }
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Public URL").setDesc("Public URL for OAuth callbacks (e.g., https://mcp.example.com). Leave empty for local access.").addText(
+      (text) => text.setValue(this.plugin.settings.publicUrl).setPlaceholder("https://mcp.example.com").onChange(async (value) => {
+        this.plugin.settings.publicUrl = value.trim();
+        await this.plugin.saveSettings();
       })
     );
     new import_obsidian2.Setting(containerEl).setName("Restart Server").setDesc("Apply settings changes").addButton(
@@ -2514,7 +2531,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     const configEl = containerEl.createEl("pre", {
       cls: "llm-bridges-config"
     });
-    const serverUrl = `http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`;
+    const serverUrl = this.plugin.settings.publicUrl || `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`;
     if (this.plugin.settings.authMethod === "oauth") {
       configEl.setText(`{
   "mcpServers": {

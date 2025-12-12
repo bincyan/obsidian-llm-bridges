@@ -57,7 +57,8 @@ interface MCPResponse {
 type AuthMethod = "apiKey" | "oauth";
 
 interface LLMBridgesSettings {
-  hostname: string;       // Server hostname (default: 127.0.0.1)
+  bindAddress: string;    // IP address to bind server to (default: 127.0.0.1, use 0.0.0.0 for all interfaces)
+  publicUrl: string;      // Public URL for OAuth callbacks and display (e.g., https://mcp.example.com)
   port: number;           // MCP SSE server port
   apiKey: string;         // API key for authentication
   authMethod: AuthMethod; // Authentication method: API Key or OAuth 2.1
@@ -65,7 +66,8 @@ interface LLMBridgesSettings {
 }
 
 const DEFAULT_SETTINGS: LLMBridgesSettings = {
-  hostname: "127.0.0.1",
+  bindAddress: "127.0.0.1",
+  publicUrl: "",          // Empty means use http://{bindAddress}:{port}
   port: 3100,
   apiKey: "",
   authMethod: "apiKey",
@@ -166,7 +168,12 @@ export default class LLMBridgesPlugin extends Plugin {
   // ===========================================================================
 
   private getBaseUrl(): string {
-    return `http://${this.settings.hostname}:${this.settings.port}`;
+    // If publicUrl is set, use it; otherwise fall back to bindAddress:port
+    if (this.settings.publicUrl) {
+      // Remove trailing slash if present
+      return this.settings.publicUrl.replace(/\/$/, '');
+    }
+    return `http://${this.settings.bindAddress}:${this.settings.port}`;
   }
 
   startServer() {
@@ -521,8 +528,9 @@ export default class LLMBridgesPlugin extends Plugin {
       res.end(JSON.stringify({ error: "Not found" }));
     });
 
-    this.server.listen(this.settings.port, this.settings.hostname, () => {
-      console.log(`LLM Bridges MCP Server listening on ${this.getBaseUrl()}`);
+    this.server.listen(this.settings.port, this.settings.bindAddress, () => {
+      console.log(`LLM Bridges MCP Server bound to ${this.settings.bindAddress}:${this.settings.port}`);
+      console.log(`Public URL: ${this.getBaseUrl()}`);
       console.log(`Auth method: ${this.settings.authMethod}`);
     });
 
@@ -1259,8 +1267,13 @@ class LLMBridgesSettingTab extends PluginSettingTab {
     // Status
     const statusEl = containerEl.createEl("div", { cls: "llm-bridges-status" });
     statusEl.createEl("p", {
-      text: `MCP Server running on http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`,
+      text: `Server bound to ${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`,
     });
+    if (this.plugin.settings.publicUrl) {
+      statusEl.createEl("p", {
+        text: `Public URL: ${this.plugin.settings.publicUrl}`,
+      });
+    }
     statusEl.createEl("p", {
       text: `Authentication: ${this.plugin.settings.authMethod === "oauth" ? "OAuth 2.1" : "API Key"}`,
       cls: "llm-bridges-auth-status",
@@ -1327,7 +1340,7 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       });
 
       // OAuth Endpoints Info
-      const baseUrl = `http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`;
+      const baseUrl = this.plugin.settings.publicUrl || `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`;
       const endpointsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-endpoints" });
       endpointsEl.createEl("h4", { text: "OAuth Endpoints" });
       const endpointsList = endpointsEl.createEl("ul");
@@ -1400,15 +1413,15 @@ class LLMBridgesSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "Server" });
 
     new Setting(containerEl)
-      .setName("Hostname")
-      .setDesc("Server hostname/IP to bind to (use 0.0.0.0 to listen on all interfaces)")
+      .setName("Bind Address")
+      .setDesc("IP address to bind server to (127.0.0.1 = local only, 0.0.0.0 = all interfaces)")
       .addText((text) =>
         text
-          .setValue(this.plugin.settings.hostname)
+          .setValue(this.plugin.settings.bindAddress)
           .setPlaceholder("127.0.0.1")
           .onChange(async (value) => {
             if (value.trim()) {
-              this.plugin.settings.hostname = value.trim();
+              this.plugin.settings.bindAddress = value.trim();
               await this.plugin.saveSettings();
             }
           })
@@ -1426,6 +1439,19 @@ class LLMBridgesSettingTab extends PluginSettingTab {
               this.plugin.settings.port = port;
               await this.plugin.saveSettings();
             }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Public URL")
+      .setDesc("Public URL for OAuth callbacks (e.g., https://mcp.example.com). Leave empty for local access.")
+      .addText((text) =>
+        text
+          .setValue(this.plugin.settings.publicUrl)
+          .setPlaceholder("https://mcp.example.com")
+          .onChange(async (value) => {
+            this.plugin.settings.publicUrl = value.trim();
+            await this.plugin.saveSettings();
           })
       );
 
@@ -1452,7 +1478,7 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       cls: "llm-bridges-config",
     });
 
-    const serverUrl = `http://${this.plugin.settings.hostname}:${this.plugin.settings.port}`;
+    const serverUrl = this.plugin.settings.publicUrl || `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`;
     if (this.plugin.settings.authMethod === "oauth") {
       configEl.setText(`{
   "mcpServers": {
