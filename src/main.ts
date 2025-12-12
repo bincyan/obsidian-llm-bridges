@@ -29,6 +29,15 @@ import {
   ValidationResult,
   DEFAULT_READ_LIMIT,
 } from "./types";
+import {
+  OAuthManager,
+  OAuthSettings,
+  DEFAULT_OAUTH_SETTINGS,
+  getAuthorizationServerMetadata,
+  getProtectedResourceMetadata,
+  getAuthorizationPageHtml,
+  getErrorPageHtml,
+} from "./oauth";
 
 // MCP Protocol types
 interface MCPRequest {
@@ -45,14 +54,20 @@ interface MCPResponse {
   error?: { code: number; message: string; data?: unknown };
 }
 
+type AuthMethod = "apiKey" | "oauth";
+
 interface LLMBridgesSettings {
-  port: number;    // MCP SSE server port
-  apiKey: string;  // API key for authentication
+  port: number;           // MCP SSE server port
+  apiKey: string;         // API key for authentication
+  authMethod: AuthMethod; // Authentication method: API Key or OAuth 2.1
+  oauth: OAuthSettings;   // OAuth 2.1 settings
 }
 
 const DEFAULT_SETTINGS: LLMBridgesSettings = {
   port: 3100,
   apiKey: "",
+  authMethod: "apiKey",
+  oauth: DEFAULT_OAUTH_SETTINGS,
 };
 
 export default class LLMBridgesPlugin extends Plugin {
@@ -60,6 +75,8 @@ export default class LLMBridgesPlugin extends Plugin {
   server: http.Server | null = null;
   sessions: Map<string, http.ServerResponse> = new Map();
   kbManager: KBManager;
+  oauthManager: OAuthManager | null = null;
+  tokenCleanupInterval: ReturnType<typeof setInterval> | null = null;
 
   async onload() {
     await this.loadSettings();
@@ -70,6 +87,14 @@ export default class LLMBridgesPlugin extends Plugin {
       this.settings.apiKey = this.generateApiKey();
       await this.saveSettings();
     }
+
+    // Initialize OAuth manager
+    this.initOAuthManager();
+
+    // Start token cleanup interval (every 5 minutes)
+    this.tokenCleanupInterval = setInterval(() => {
+      this.oauthManager?.cleanupExpiredTokens();
+    }, 5 * 60 * 1000);
 
     // Add settings tab
     this.addSettingTab(new LLMBridgesSettingTab(this.app, this));
@@ -100,7 +125,20 @@ export default class LLMBridgesPlugin extends Plugin {
     this.startServer();
   }
 
+  private initOAuthManager(): void {
+    this.oauthManager = new OAuthManager(
+      this.settings.oauth,
+      async (oauthSettings) => {
+        this.settings.oauth = oauthSettings;
+        await this.saveSettings();
+      }
+    );
+  }
+
   onunload() {
+    if (this.tokenCleanupInterval) {
+      clearInterval(this.tokenCleanupInterval);
+    }
     this.stopServer();
   }
 
@@ -122,8 +160,12 @@ export default class LLMBridgesPlugin extends Plugin {
   }
 
   // ===========================================================================
-  // MCP SSE Server
+  // MCP SSE Server with OAuth 2.1 Support
   // ===========================================================================
+
+  private getBaseUrl(): string {
+    return `http://127.0.0.1:${this.settings.port}`;
+  }
 
   startServer() {
     if (this.server) {
@@ -142,27 +184,281 @@ export default class LLMBridgesPlugin extends Plugin {
         return;
       }
 
-      const url = new URL(req.url || "/", `http://127.0.0.1:${this.settings.port}`);
+      const url = new URL(req.url || "/", this.getBaseUrl());
 
-      // Health check (no auth)
+      // =========================================================================
+      // Public Endpoints (no auth required)
+      // =========================================================================
+
+      // Health check
       if (url.pathname === "/" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           status: "ok",
           version: this.manifest.version,
           vault: this.app.vault.getName(),
+          authMethod: this.settings.authMethod,
         }));
         return;
       }
 
-      // Auth check for all other endpoints
-      if (this.settings.apiKey) {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || authHeader !== `Bearer ${this.settings.apiKey}`) {
-          res.writeHead(401, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Unauthorized", message: "Invalid or missing Bearer token" }));
+      // OAuth 2.1 Authorization Server Metadata (RFC 8414)
+      if (url.pathname === "/.well-known/oauth-authorization-server" && req.method === "GET") {
+        const metadata = getAuthorizationServerMetadata(this.getBaseUrl());
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(metadata));
+        return;
+      }
+
+      // Protected Resource Metadata (MCP Spec)
+      if (url.pathname === "/.well-known/oauth-protected-resource" && req.method === "GET") {
+        const metadata = getProtectedResourceMetadata(this.getBaseUrl());
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(metadata));
+        return;
+      }
+
+      // =========================================================================
+      // OAuth 2.1 Endpoints
+      // =========================================================================
+
+      // Authorization endpoint
+      if (url.pathname === "/oauth/authorize" && req.method === "GET") {
+        if (this.settings.authMethod !== "oauth" || !this.oauthManager) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request", error_description: "OAuth not enabled" }));
           return;
         }
+
+        const clientId = url.searchParams.get("client_id");
+        const redirectUri = url.searchParams.get("redirect_uri");
+        const responseType = url.searchParams.get("response_type");
+        const codeChallenge = url.searchParams.get("code_challenge");
+        const codeChallengeMethod = url.searchParams.get("code_challenge_method");
+        const scope = url.searchParams.get("scope") || "mcp:read mcp:write";
+        const state = url.searchParams.get("state");
+
+        // Validate required parameters
+        if (!clientId || !redirectUri || !responseType || !codeChallenge || !codeChallengeMethod) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Invalid Request", "Missing required OAuth parameters"));
+          return;
+        }
+
+        if (responseType !== "code") {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Unsupported Response Type", "Only 'code' response type is supported"));
+          return;
+        }
+
+        if (codeChallengeMethod !== "S256") {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Unsupported Code Challenge Method", "Only S256 is supported"));
+          return;
+        }
+
+        // Validate client
+        const client = this.oauthManager.getClient(clientId);
+        if (!client) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Unknown Client", `Client '${clientId}' is not registered`));
+          return;
+        }
+
+        // Validate redirect URI
+        if (!this.oauthManager.validateRedirectUri(clientId, redirectUri)) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Invalid Redirect URI", "The redirect URI is not allowed for this client"));
+          return;
+        }
+
+        // Generate authorization code
+        const authCode = this.oauthManager.generateAuthorizationCode(
+          clientId,
+          redirectUri,
+          codeChallenge,
+          "S256",
+          scope
+        );
+
+        // Show authorization page
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(getAuthorizationPageHtml(client.client_name, scope, authCode.code, redirectUri, state || undefined));
+        return;
+      }
+
+      // Authorization decision endpoint
+      if (url.pathname === "/oauth/authorize/decision" && req.method === "POST") {
+        if (!this.oauthManager) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request" }));
+          return;
+        }
+
+        const body = await this.readRequestBody(req);
+        const params = new URLSearchParams(body);
+        const decision = params.get("decision");
+        const code = params.get("code");
+        const redirectUri = params.get("redirect_uri");
+        const state = params.get("state");
+
+        if (!code || !redirectUri) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Invalid Request", "Missing required parameters"));
+          return;
+        }
+
+        const redirectUrl = new URL(redirectUri);
+
+        if (decision === "approve") {
+          this.oauthManager.approveAuthorizationCode(code);
+          redirectUrl.searchParams.set("code", code);
+          if (state) redirectUrl.searchParams.set("state", state);
+        } else {
+          this.oauthManager.denyAuthorizationCode(code);
+          redirectUrl.searchParams.set("error", "access_denied");
+          redirectUrl.searchParams.set("error_description", "User denied the authorization request");
+          if (state) redirectUrl.searchParams.set("state", state);
+        }
+
+        res.writeHead(302, { Location: redirectUrl.toString() });
+        res.end();
+        return;
+      }
+
+      // Token endpoint
+      if (url.pathname === "/oauth/token" && req.method === "POST") {
+        if (this.settings.authMethod !== "oauth" || !this.oauthManager) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request", error_description: "OAuth not enabled" }));
+          return;
+        }
+
+        const body = await this.readRequestBody(req);
+        const contentType = req.headers["content-type"] || "";
+
+        let params: URLSearchParams;
+        if (contentType.includes("application/json")) {
+          const json = JSON.parse(body);
+          params = new URLSearchParams(json);
+        } else {
+          params = new URLSearchParams(body);
+        }
+
+        const grantType = params.get("grant_type");
+        const clientId = params.get("client_id");
+
+        if (!grantType || !clientId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing required parameters" }));
+          return;
+        }
+
+        if (grantType === "authorization_code") {
+          const code = params.get("code");
+          const redirectUri = params.get("redirect_uri");
+          const codeVerifier = params.get("code_verifier");
+
+          if (!code || !redirectUri || !codeVerifier) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing required parameters" }));
+            return;
+          }
+
+          const result = this.oauthManager.exchangeCodeForTokens(code, clientId, redirectUri, codeVerifier);
+
+          if ("error" in result) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(result));
+            return;
+          }
+
+          res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({
+            access_token: result.access_token.access_token,
+            token_type: result.access_token.token_type,
+            expires_in: result.access_token.expires_in,
+            refresh_token: result.refresh_token?.refresh_token,
+            scope: result.access_token.scope,
+          }));
+          return;
+        }
+
+        if (grantType === "refresh_token") {
+          const refreshToken = params.get("refresh_token");
+
+          if (!refreshToken) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing refresh_token" }));
+            return;
+          }
+
+          const result = this.oauthManager.refreshAccessToken(refreshToken, clientId);
+
+          if ("error" in result) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(result));
+            return;
+          }
+
+          res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({
+            access_token: result.access_token.access_token,
+            token_type: result.access_token.token_type,
+            expires_in: result.access_token.expires_in,
+            refresh_token: result.refresh_token?.refresh_token,
+            scope: result.access_token.scope,
+          }));
+          return;
+        }
+
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unsupported_grant_type" }));
+        return;
+      }
+
+      // Token revocation endpoint
+      if (url.pathname === "/oauth/revoke" && req.method === "POST") {
+        if (!this.oauthManager) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request" }));
+          return;
+        }
+
+        const body = await this.readRequestBody(req);
+        const params = new URLSearchParams(body);
+        const token = params.get("token");
+
+        if (token) {
+          this.oauthManager.revokeToken(token);
+        }
+
+        // Always return 200 OK per RFC 7009
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ revoked: true }));
+        return;
+      }
+
+      // =========================================================================
+      // Protected Endpoints (auth required)
+      // =========================================================================
+
+      // Authentication check
+      const authResult = this.checkAuthentication(req);
+      if (!authResult.authenticated) {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+
+        // Add WWW-Authenticate header for OAuth mode (MCP spec requirement)
+        if (this.settings.authMethod === "oauth") {
+          headers["WWW-Authenticate"] = `Bearer resource_metadata="${this.getBaseUrl()}/.well-known/oauth-protected-resource"`;
+        }
+
+        res.writeHead(401, headers);
+        res.end(JSON.stringify({
+          error: "unauthorized",
+          error_description: authResult.error || "Invalid or missing authentication",
+        }));
+        return;
       }
 
       // SSE endpoint - establish connection
@@ -198,27 +494,24 @@ export default class LLMBridgesPlugin extends Plugin {
           return;
         }
 
-        let body = "";
-        req.on("data", (chunk) => (body += chunk));
-        req.on("end", async () => {
-          try {
-            const request = JSON.parse(body) as MCPRequest;
-            const response = await this.handleMCPRequest(request);
+        const body = await this.readRequestBody(req);
+        try {
+          const request = JSON.parse(body) as MCPRequest;
+          const response = await this.handleMCPRequest(request);
 
-            // Send response via SSE
-            const sseRes = this.sessions.get(sessionId);
-            if (sseRes) {
-              sseRes.write(`event: message\ndata: ${JSON.stringify(response)}\n\n`);
-            }
-
-            res.writeHead(202, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ status: "accepted" }));
-          } catch (error) {
-            console.error("MCP: Error handling message:", error);
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Internal server error" }));
+          // Send response via SSE
+          const sseRes = this.sessions.get(sessionId);
+          if (sseRes) {
+            sseRes.write(`event: message\ndata: ${JSON.stringify(response)}\n\n`);
           }
-        });
+
+          res.writeHead(202, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "accepted" }));
+        } catch (error) {
+          console.error("MCP: Error handling message:", error);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Internal server error" }));
+        }
         return;
       }
 
@@ -227,12 +520,63 @@ export default class LLMBridgesPlugin extends Plugin {
     });
 
     this.server.listen(this.settings.port, "127.0.0.1", () => {
-      console.log(`LLM Bridges MCP Server listening on http://127.0.0.1:${this.settings.port}`);
+      console.log(`LLM Bridges MCP Server listening on ${this.getBaseUrl()}`);
+      console.log(`Auth method: ${this.settings.authMethod}`);
     });
 
     this.server.on("error", (err) => {
       console.error("MCP Server error:", err);
       new Notice(`LLM Bridges: Server error - ${err.message}`);
+    });
+  }
+
+  // ===========================================================================
+  // Authentication Helpers
+  // ===========================================================================
+
+  private checkAuthentication(req: http.IncomingMessage): { authenticated: boolean; error?: string } {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader) {
+      return { authenticated: false, error: "Missing Authorization header" };
+    }
+
+    if (!authHeader.startsWith("Bearer ")) {
+      return { authenticated: false, error: "Invalid authorization scheme" };
+    }
+
+    const token = authHeader.slice(7);
+
+    if (this.settings.authMethod === "apiKey") {
+      // API Key authentication
+      if (token === this.settings.apiKey) {
+        return { authenticated: true };
+      }
+      return { authenticated: false, error: "Invalid API key" };
+    }
+
+    if (this.settings.authMethod === "oauth") {
+      // OAuth 2.1 authentication
+      if (!this.oauthManager) {
+        return { authenticated: false, error: "OAuth not configured" };
+      }
+
+      const accessToken = this.oauthManager.validateAccessToken(token);
+      if (accessToken) {
+        return { authenticated: true };
+      }
+      return { authenticated: false, error: "Invalid or expired access token" };
+    }
+
+    return { authenticated: false, error: "Unknown authentication method" };
+  }
+
+  private readRequestBody(req: http.IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => resolve(body));
+      req.on("error", reject);
     });
   }
 
@@ -866,16 +1210,30 @@ export default class LLMBridgesPlugin extends Plugin {
   }
 
   copyMCPConfig() {
-    const config = {
-      mcpServers: {
-        obsidian: {
-          url: `http://127.0.0.1:${this.settings.port}/sse`,
-          headers: {
-            Authorization: `Bearer ${this.settings.apiKey}`,
+    let config;
+
+    if (this.settings.authMethod === "oauth") {
+      // OAuth configuration (Claude will handle the OAuth flow)
+      config = {
+        mcpServers: {
+          obsidian: {
+            url: `http://127.0.0.1:${this.settings.port}/sse`,
           },
         },
-      },
-    };
+      };
+    } else {
+      // API Key configuration
+      config = {
+        mcpServers: {
+          obsidian: {
+            url: `http://127.0.0.1:${this.settings.port}/sse`,
+            headers: {
+              Authorization: `Bearer ${this.settings.apiKey}`,
+            },
+          },
+        },
+      };
+    }
 
     navigator.clipboard.writeText(JSON.stringify(config, null, 2));
     new Notice("MCP configuration copied to clipboard!");
@@ -901,30 +1259,142 @@ class LLMBridgesSettingTab extends PluginSettingTab {
     statusEl.createEl("p", {
       text: `MCP Server running on http://127.0.0.1:${this.plugin.settings.port}`,
     });
+    statusEl.createEl("p", {
+      text: `Authentication: ${this.plugin.settings.authMethod === "oauth" ? "OAuth 2.1" : "API Key"}`,
+      cls: "llm-bridges-auth-status",
+    });
 
-    // API Key display
+    // ===========================================================================
+    // Authentication Method Selection
+    // ===========================================================================
+    containerEl.createEl("h3", { text: "Authentication" });
+
     new Setting(containerEl)
-      .setName("API Key")
-      .setDesc("Used to authenticate MCP requests (Bearer token)")
-      .addText((text) =>
-        text
-          .setValue(this.plugin.settings.apiKey)
-          .setDisabled(true)
-      )
-      .addButton((btn) =>
-        btn.setButtonText("Copy").onClick(() => {
-          navigator.clipboard.writeText(this.plugin.settings.apiKey);
-          new Notice("API Key copied!");
-        })
-      )
-      .addButton((btn) =>
-        btn.setButtonText("Regenerate").onClick(async () => {
-          this.plugin.settings.apiKey = this.plugin.generateApiKey();
-          await this.plugin.saveSettings();
-          this.display();
-          new Notice("API Key regenerated!");
-        })
+      .setName("Authentication Method")
+      .setDesc("Choose how clients authenticate with the MCP server")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("apiKey", "API Key (Simple)")
+          .addOption("oauth", "OAuth 2.1 (Recommended for Claude)")
+          .setValue(this.plugin.settings.authMethod)
+          .onChange(async (value) => {
+            this.plugin.settings.authMethod = value as AuthMethod;
+            await this.plugin.saveSettings();
+            this.plugin.restartServer();
+            this.display();
+          })
       );
+
+    // ===========================================================================
+    // API Key Settings (shown when apiKey method selected)
+    // ===========================================================================
+    if (this.plugin.settings.authMethod === "apiKey") {
+      new Setting(containerEl)
+        .setName("API Key")
+        .setDesc("Used to authenticate MCP requests (Bearer token)")
+        .addText((text) =>
+          text
+            .setValue(this.plugin.settings.apiKey)
+            .setDisabled(true)
+        )
+        .addButton((btn) =>
+          btn.setButtonText("Copy").onClick(() => {
+            navigator.clipboard.writeText(this.plugin.settings.apiKey);
+            new Notice("API Key copied!");
+          })
+        )
+        .addButton((btn) =>
+          btn.setButtonText("Regenerate").onClick(async () => {
+            this.plugin.settings.apiKey = this.plugin.generateApiKey();
+            await this.plugin.saveSettings();
+            this.display();
+            new Notice("API Key regenerated!");
+          })
+        );
+    }
+
+    // ===========================================================================
+    // OAuth 2.1 Settings (shown when oauth method selected)
+    // ===========================================================================
+    if (this.plugin.settings.authMethod === "oauth") {
+      const oauthSection = containerEl.createEl("div", { cls: "llm-bridges-oauth-section" });
+
+      oauthSection.createEl("p", {
+        text: "OAuth 2.1 is enabled. Claude Desktop will automatically authenticate using the OAuth flow.",
+        cls: "setting-item-description",
+      });
+
+      // OAuth Endpoints Info
+      const endpointsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-endpoints" });
+      endpointsEl.createEl("h4", { text: "OAuth Endpoints" });
+      const endpointsList = endpointsEl.createEl("ul");
+      endpointsList.createEl("li", {
+        text: `Authorization: http://127.0.0.1:${this.plugin.settings.port}/oauth/authorize`,
+      });
+      endpointsList.createEl("li", {
+        text: `Token: http://127.0.0.1:${this.plugin.settings.port}/oauth/token`,
+      });
+      endpointsList.createEl("li", {
+        text: `Metadata: http://127.0.0.1:${this.plugin.settings.port}/.well-known/oauth-authorization-server`,
+      });
+
+      // Token Lifetimes
+      new Setting(oauthSection)
+        .setName("Access Token Lifetime")
+        .setDesc("How long access tokens remain valid (in seconds)")
+        .addText((text) =>
+          text
+            .setValue(String(this.plugin.settings.oauth.access_token_lifetime))
+            .setPlaceholder("3600")
+            .onChange(async (value) => {
+              const lifetime = parseInt(value);
+              if (!isNaN(lifetime) && lifetime > 0) {
+                this.plugin.settings.oauth.access_token_lifetime = lifetime;
+                await this.plugin.saveSettings();
+              }
+            })
+        );
+
+      new Setting(oauthSection)
+        .setName("Refresh Token Lifetime")
+        .setDesc("How long refresh tokens remain valid (in seconds)")
+        .addText((text) =>
+          text
+            .setValue(String(this.plugin.settings.oauth.refresh_token_lifetime))
+            .setPlaceholder("604800")
+            .onChange(async (value) => {
+              const lifetime = parseInt(value);
+              if (!isNaN(lifetime) && lifetime > 0) {
+                this.plugin.settings.oauth.refresh_token_lifetime = lifetime;
+                await this.plugin.saveSettings();
+              }
+            })
+        );
+
+      // Registered Clients
+      const clientsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-clients" });
+      clientsEl.createEl("h4", { text: "Registered Clients" });
+
+      const clients = this.plugin.settings.oauth.clients;
+      if (clients.length === 0) {
+        clientsEl.createEl("p", {
+          text: "No clients registered. Claude Desktop will be automatically registered on first connection.",
+          cls: "setting-item-description",
+        });
+      } else {
+        const clientsList = clientsEl.createEl("ul");
+        for (const client of clients) {
+          clientsList.createEl("li", {
+            text: `${client.client_name} (${client.client_id})`,
+          });
+        }
+      }
+    }
+
+    // ===========================================================================
+    // Server Settings
+    // ===========================================================================
+    containerEl.createEl("h3", { text: "Server" });
 
     new Setting(containerEl)
       .setName("Port")
@@ -943,14 +1413,16 @@ class LLMBridgesSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Restart Server")
-      .setDesc("Apply port changes")
+      .setDesc("Apply settings changes")
       .addButton((btn) =>
         btn.setButtonText("Restart").onClick(() => {
           this.plugin.restartServer();
         })
       );
 
-    // Claude Setup
+    // ===========================================================================
+    // Claude Desktop Setup
+    // ===========================================================================
     containerEl.createEl("h3", { text: "Claude Desktop Setup" });
 
     const instructionsEl = containerEl.createEl("div");
@@ -961,7 +1433,20 @@ class LLMBridgesSettingTab extends PluginSettingTab {
     const configEl = containerEl.createEl("pre", {
       cls: "llm-bridges-config",
     });
-    configEl.setText(`{
+
+    if (this.plugin.settings.authMethod === "oauth") {
+      configEl.setText(`{
+  "mcpServers": {
+    "obsidian": {
+      "url": "http://127.0.0.1:${this.plugin.settings.port}/sse"
+    }
+  }
+}
+
+Note: When using OAuth, Claude will automatically discover
+the authorization endpoints and prompt you to authorize.`);
+    } else {
+      configEl.setText(`{
   "mcpServers": {
     "obsidian": {
       "url": "http://127.0.0.1:${this.plugin.settings.port}/sse",
@@ -971,6 +1456,7 @@ class LLMBridgesSettingTab extends PluginSettingTab {
     }
   }
 }`);
+    }
 
     new Setting(containerEl).addButton((btn) =>
       btn

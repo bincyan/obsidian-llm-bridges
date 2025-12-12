@@ -894,16 +894,523 @@ function validateConstraintRulesSchema(rules) {
   };
 }
 
+// src/oauth.ts
+var crypto = __toESM(require("crypto"), 1);
+var DEFAULT_OAUTH_SETTINGS = {
+  enabled: false,
+  clients: [],
+  access_token_lifetime: 3600,
+  refresh_token_lifetime: 604800,
+  authorization_code_lifetime: 600
+};
+var CLAUDE_DESKTOP_CLIENT = {
+  client_id: "claude-desktop",
+  client_name: "Claude Desktop",
+  redirect_uris: [
+    "http://localhost",
+    "http://127.0.0.1"
+    // Claude uses dynamic ports, so we'll validate the host only
+  ],
+  created_at: new Date().toISOString(),
+  scope: "mcp:read mcp:write"
+};
+function getAuthorizationServerMetadata(baseUrl) {
+  return {
+    issuer: baseUrl,
+    authorization_endpoint: `${baseUrl}/oauth/authorize`,
+    token_endpoint: `${baseUrl}/oauth/token`,
+    token_endpoint_auth_methods_supported: ["none"],
+    // Public clients (PKCE)
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    response_types_supported: ["code"],
+    code_challenge_methods_supported: ["S256"],
+    scopes_supported: ["mcp:read", "mcp:write", "mcp:admin"],
+    service_documentation: "https://github.com/bincyan/obsidian-llm-bridges"
+  };
+}
+function getProtectedResourceMetadata(baseUrl) {
+  return {
+    resource: baseUrl,
+    authorization_servers: [baseUrl],
+    bearer_methods_supported: ["header"],
+    scopes_supported: ["mcp:read", "mcp:write", "mcp:admin"]
+  };
+}
+var OAuthManager = class {
+  constructor(settings, saveCallback) {
+    this.authorizationCodes = /* @__PURE__ */ new Map();
+    this.accessTokens = /* @__PURE__ */ new Map();
+    this.refreshTokens = /* @__PURE__ */ new Map();
+    this.settings = settings;
+    this.saveCallback = saveCallback;
+    if (settings.enabled && !settings.clients.find((c) => c.client_id === "claude-desktop")) {
+      this.registerClient(CLAUDE_DESKTOP_CLIENT);
+    }
+  }
+  // ============================================================================
+  // Client Management
+  // ============================================================================
+  async registerClient(client) {
+    const existing = this.settings.clients.find((c) => c.client_id === client.client_id);
+    if (existing) {
+      return existing;
+    }
+    this.settings.clients.push(client);
+    await this.saveCallback(this.settings);
+    return client;
+  }
+  getClient(clientId) {
+    return this.settings.clients.find((c) => c.client_id === clientId);
+  }
+  validateRedirectUri(clientId, redirectUri) {
+    const client = this.getClient(clientId);
+    if (!client)
+      return false;
+    if (clientId === "claude-desktop") {
+      try {
+        const url = new URL(redirectUri);
+        return url.hostname === "localhost" || url.hostname === "127.0.0.1";
+      } catch (e) {
+        return false;
+      }
+    }
+    return client.redirect_uris.includes(redirectUri);
+  }
+  // ============================================================================
+  // Authorization Code Flow
+  // ============================================================================
+  generateAuthorizationCode(clientId, redirectUri, codeChallenge, codeChallengeMethod, scope) {
+    const code = this.generateSecureToken(32);
+    const expiresAt = Date.now() + this.settings.authorization_code_lifetime * 1e3;
+    const authCode = {
+      code,
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_challenge: codeChallenge,
+      code_challenge_method: codeChallengeMethod,
+      scope,
+      expires_at: expiresAt,
+      user_approved: false
+    };
+    this.authorizationCodes.set(code, authCode);
+    return authCode;
+  }
+  approveAuthorizationCode(code) {
+    const authCode = this.authorizationCodes.get(code);
+    if (!authCode)
+      return false;
+    authCode.user_approved = true;
+    return true;
+  }
+  denyAuthorizationCode(code) {
+    this.authorizationCodes.delete(code);
+  }
+  getAuthorizationCode(code) {
+    const authCode = this.authorizationCodes.get(code);
+    if (!authCode)
+      return void 0;
+    if (Date.now() > authCode.expires_at) {
+      this.authorizationCodes.delete(code);
+      return void 0;
+    }
+    return authCode;
+  }
+  // ============================================================================
+  // Token Exchange
+  // ============================================================================
+  exchangeCodeForTokens(code, clientId, redirectUri, codeVerifier) {
+    const authCode = this.getAuthorizationCode(code);
+    if (!authCode) {
+      return { error: "invalid_grant", error_description: "Authorization code not found or expired" };
+    }
+    if (!authCode.user_approved) {
+      return { error: "access_denied", error_description: "Authorization not approved by user" };
+    }
+    if (authCode.client_id !== clientId) {
+      return { error: "invalid_grant", error_description: "Client ID mismatch" };
+    }
+    if (authCode.redirect_uri !== redirectUri) {
+      return { error: "invalid_grant", error_description: "Redirect URI mismatch" };
+    }
+    if (!this.verifyCodeChallenge(codeVerifier, authCode.code_challenge)) {
+      return { error: "invalid_grant", error_description: "Invalid code verifier" };
+    }
+    this.authorizationCodes.delete(code);
+    const accessToken = this.generateAccessToken(clientId, authCode.scope);
+    const refreshToken = this.generateRefreshToken(clientId, authCode.scope);
+    accessToken.refresh_token = refreshToken.refresh_token;
+    return { access_token: accessToken, refresh_token: refreshToken };
+  }
+  refreshAccessToken(refreshTokenStr, clientId) {
+    const refreshToken = this.refreshTokens.get(refreshTokenStr);
+    if (!refreshToken) {
+      return { error: "invalid_grant", error_description: "Refresh token not found" };
+    }
+    if (Date.now() > refreshToken.expires_at) {
+      this.refreshTokens.delete(refreshTokenStr);
+      return { error: "invalid_grant", error_description: "Refresh token expired" };
+    }
+    if (refreshToken.client_id !== clientId) {
+      return { error: "invalid_grant", error_description: "Client ID mismatch" };
+    }
+    const newAccessToken = this.generateAccessToken(clientId, refreshToken.scope);
+    this.refreshTokens.delete(refreshTokenStr);
+    const newRefreshToken = this.generateRefreshToken(clientId, refreshToken.scope);
+    newAccessToken.refresh_token = newRefreshToken.refresh_token;
+    return { access_token: newAccessToken, refresh_token: newRefreshToken };
+  }
+  // ============================================================================
+  // Token Validation
+  // ============================================================================
+  validateAccessToken(tokenStr) {
+    const token = this.accessTokens.get(tokenStr);
+    if (!token)
+      return null;
+    if (Date.now() > token.expires_at) {
+      this.accessTokens.delete(tokenStr);
+      return null;
+    }
+    return token;
+  }
+  revokeToken(tokenStr) {
+    const accessDeleted = this.accessTokens.delete(tokenStr);
+    const refreshDeleted = this.refreshTokens.delete(tokenStr);
+    return accessDeleted || refreshDeleted;
+  }
+  revokeAllClientTokens(clientId) {
+    for (const [key, token] of this.accessTokens) {
+      if (token.client_id === clientId) {
+        this.accessTokens.delete(key);
+      }
+    }
+    for (const [key, token] of this.refreshTokens) {
+      if (token.client_id === clientId) {
+        this.refreshTokens.delete(key);
+      }
+    }
+  }
+  // ============================================================================
+  // PKCE Helpers
+  // ============================================================================
+  verifyCodeChallenge(codeVerifier, codeChallenge) {
+    const hash = crypto.createHash("sha256").update(codeVerifier).digest();
+    const computed = this.base64UrlEncode(hash);
+    return computed === codeChallenge;
+  }
+  base64UrlEncode(buffer) {
+    return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+  }
+  // ============================================================================
+  // Token Generation
+  // ============================================================================
+  generateAccessToken(clientId, scope) {
+    const tokenStr = this.generateSecureToken(32);
+    const expiresIn = this.settings.access_token_lifetime;
+    const expiresAt = Date.now() + expiresIn * 1e3;
+    const token = {
+      access_token: tokenStr,
+      token_type: "Bearer",
+      expires_in: expiresIn,
+      expires_at: expiresAt,
+      scope,
+      client_id: clientId
+    };
+    this.accessTokens.set(tokenStr, token);
+    return token;
+  }
+  generateRefreshToken(clientId, scope) {
+    const tokenStr = this.generateSecureToken(48);
+    const expiresAt = Date.now() + this.settings.refresh_token_lifetime * 1e3;
+    const token = {
+      refresh_token: tokenStr,
+      client_id: clientId,
+      scope,
+      expires_at: expiresAt
+    };
+    this.refreshTokens.set(tokenStr, token);
+    return token;
+  }
+  generateSecureToken(length) {
+    return crypto.randomBytes(length).toString("hex");
+  }
+  // ============================================================================
+  // Cleanup
+  // ============================================================================
+  cleanupExpiredTokens() {
+    const now = Date.now();
+    for (const [key, code] of this.authorizationCodes) {
+      if (now > code.expires_at) {
+        this.authorizationCodes.delete(key);
+      }
+    }
+    for (const [key, token] of this.accessTokens) {
+      if (now > token.expires_at) {
+        this.accessTokens.delete(key);
+      }
+    }
+    for (const [key, token] of this.refreshTokens) {
+      if (now > token.expires_at) {
+        this.refreshTokens.delete(key);
+      }
+    }
+  }
+  // ============================================================================
+  // Settings Management
+  // ============================================================================
+  isEnabled() {
+    return this.settings.enabled;
+  }
+  async setEnabled(enabled) {
+    this.settings.enabled = enabled;
+    if (enabled && !this.settings.clients.find((c) => c.client_id === "claude-desktop")) {
+      this.settings.clients.push({
+        ...CLAUDE_DESKTOP_CLIENT,
+        created_at: new Date().toISOString()
+      });
+    }
+    await this.saveCallback(this.settings);
+  }
+  getSettings() {
+    return { ...this.settings };
+  }
+  async updateSettings(updates) {
+    this.settings = { ...this.settings, ...updates };
+    await this.saveCallback(this.settings);
+  }
+  // Get pending authorization requests for UI
+  getPendingAuthorizations() {
+    const pending = [];
+    const now = Date.now();
+    for (const code of this.authorizationCodes.values()) {
+      if (!code.user_approved && now < code.expires_at) {
+        pending.push(code);
+      }
+    }
+    return pending;
+  }
+};
+function getAuthorizationPageHtml(clientName, scope, code, redirectUri, state) {
+  const scopeDescriptions = {
+    "mcp:read": "Read your notes and vault structure",
+    "mcp:write": "Create, update, and delete notes",
+    "mcp:admin": "Full administrative access"
+  };
+  const scopes = scope.split(" ").filter((s) => s);
+  const scopeList = scopes.map((s) => `<li>${scopeDescriptions[s] || s}</li>`).join("\n");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Authorize - LLM Bridges</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
+      padding: 20px;
+    }
+    .card {
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+      max-width: 420px;
+      width: 100%;
+      padding: 40px;
+    }
+    .logo {
+      width: 64px;
+      height: 64px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 24px;
+      font-size: 32px;
+    }
+    h1 {
+      color: #1a1a2e;
+      font-size: 24px;
+      text-align: center;
+      margin: 0 0 8px;
+    }
+    .client-name {
+      color: #667eea;
+      font-weight: 600;
+    }
+    .subtitle {
+      color: #6b7280;
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .permissions {
+      background: #f3f4f6;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .permissions h3 {
+      color: #374151;
+      font-size: 14px;
+      margin: 0 0 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .permissions ul {
+      margin: 0;
+      padding-left: 20px;
+      color: #4b5563;
+    }
+    .permissions li {
+      margin-bottom: 8px;
+    }
+    .buttons {
+      display: flex;
+      gap: 12px;
+    }
+    button {
+      flex: 1;
+      padding: 14px 24px;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .approve {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+    }
+    .approve:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 20px -10px rgba(102, 126, 234, 0.5);
+    }
+    .deny {
+      background: white;
+      color: #6b7280;
+      border: 2px solid #e5e7eb;
+    }
+    .deny:hover {
+      border-color: #d1d5db;
+      background: #f9fafb;
+    }
+    .warning {
+      background: #fef3c7;
+      border-left: 4px solid #f59e0b;
+      padding: 12px 16px;
+      border-radius: 0 8px 8px 0;
+      margin-bottom: 24px;
+      font-size: 14px;
+      color: #92400e;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">\u{1F517}</div>
+    <h1>Authorize <span class="client-name">${escapeHtml(clientName)}</span></h1>
+    <p class="subtitle">wants to access your Obsidian vault</p>
+
+    <div class="warning">
+      Only authorize applications you trust. This will grant access to your notes.
+    </div>
+
+    <div class="permissions">
+      <h3>Permissions Requested</h3>
+      <ul>
+        ${scopeList}
+      </ul>
+    </div>
+
+    <form method="POST" action="/oauth/authorize/decision">
+      <input type="hidden" name="code" value="${escapeHtml(code)}">
+      <input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}">
+      ${state ? `<input type="hidden" name="state" value="${escapeHtml(state)}">` : ""}
+
+      <div class="buttons">
+        <button type="submit" name="decision" value="deny" class="deny">Deny</button>
+        <button type="submit" name="decision" value="approve" class="approve">Authorize</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>`;
+}
+function getErrorPageHtml(error, description) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Error - LLM Bridges</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f3f4f6;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
+      padding: 20px;
+    }
+    .card {
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      max-width: 400px;
+      padding: 40px;
+      text-align: center;
+    }
+    .icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    h1 {
+      color: #dc2626;
+      font-size: 20px;
+      margin: 0 0 12px;
+    }
+    p {
+      color: #6b7280;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">\u274C</div>
+    <h1>${escapeHtml(error)}</h1>
+    <p>${escapeHtml(description)}</p>
+  </div>
+</body>
+</html>`;
+}
+function escapeHtml(str) {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
 // src/main.ts
 var DEFAULT_SETTINGS = {
   port: 3100,
-  apiKey: ""
+  apiKey: "",
+  authMethod: "apiKey",
+  oauth: DEFAULT_OAUTH_SETTINGS
 };
 var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
   constructor() {
     super(...arguments);
     this.server = null;
     this.sessions = /* @__PURE__ */ new Map();
+    this.oauthManager = null;
+    this.tokenCleanupInterval = null;
   }
   async onload() {
     await this.loadSettings();
@@ -912,6 +1419,11 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
       this.settings.apiKey = this.generateApiKey();
       await this.saveSettings();
     }
+    this.initOAuthManager();
+    this.tokenCleanupInterval = setInterval(() => {
+      var _a;
+      (_a = this.oauthManager) == null ? void 0 : _a.cleanupExpiredTokens();
+    }, 5 * 60 * 1e3);
     this.addSettingTab(new LLMBridgesSettingTab(this.app, this));
     this.addRibbonIcon("bot", "LLM Bridges", () => {
       new import_obsidian2.Notice(
@@ -930,7 +1442,19 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
     });
     this.startServer();
   }
+  initOAuthManager() {
+    this.oauthManager = new OAuthManager(
+      this.settings.oauth,
+      async (oauthSettings) => {
+        this.settings.oauth = oauthSettings;
+        await this.saveSettings();
+      }
+    );
+  }
   onunload() {
+    if (this.tokenCleanupInterval) {
+      clearInterval(this.tokenCleanupInterval);
+    }
     this.stopServer();
   }
   async loadSettings() {
@@ -948,13 +1472,17 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
     return result;
   }
   // ===========================================================================
-  // MCP SSE Server
+  // MCP SSE Server with OAuth 2.1 Support
   // ===========================================================================
+  getBaseUrl() {
+    return `http://127.0.0.1:${this.settings.port}`;
+  }
   startServer() {
     if (this.server) {
       this.server.close();
     }
     this.server = http.createServer(async (req, res) => {
+      var _a, _b;
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -963,23 +1491,215 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
         res.end();
         return;
       }
-      const url = new URL(req.url || "/", `http://127.0.0.1:${this.settings.port}`);
+      const url = new URL(req.url || "/", this.getBaseUrl());
       if (url.pathname === "/" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           status: "ok",
           version: this.manifest.version,
-          vault: this.app.vault.getName()
+          vault: this.app.vault.getName(),
+          authMethod: this.settings.authMethod
         }));
         return;
       }
-      if (this.settings.apiKey) {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || authHeader !== `Bearer ${this.settings.apiKey}`) {
-          res.writeHead(401, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Unauthorized", message: "Invalid or missing Bearer token" }));
+      if (url.pathname === "/.well-known/oauth-authorization-server" && req.method === "GET") {
+        const metadata = getAuthorizationServerMetadata(this.getBaseUrl());
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(metadata));
+        return;
+      }
+      if (url.pathname === "/.well-known/oauth-protected-resource" && req.method === "GET") {
+        const metadata = getProtectedResourceMetadata(this.getBaseUrl());
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(metadata));
+        return;
+      }
+      if (url.pathname === "/oauth/authorize" && req.method === "GET") {
+        if (this.settings.authMethod !== "oauth" || !this.oauthManager) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request", error_description: "OAuth not enabled" }));
           return;
         }
+        const clientId = url.searchParams.get("client_id");
+        const redirectUri = url.searchParams.get("redirect_uri");
+        const responseType = url.searchParams.get("response_type");
+        const codeChallenge = url.searchParams.get("code_challenge");
+        const codeChallengeMethod = url.searchParams.get("code_challenge_method");
+        const scope = url.searchParams.get("scope") || "mcp:read mcp:write";
+        const state = url.searchParams.get("state");
+        if (!clientId || !redirectUri || !responseType || !codeChallenge || !codeChallengeMethod) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Invalid Request", "Missing required OAuth parameters"));
+          return;
+        }
+        if (responseType !== "code") {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Unsupported Response Type", "Only 'code' response type is supported"));
+          return;
+        }
+        if (codeChallengeMethod !== "S256") {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Unsupported Code Challenge Method", "Only S256 is supported"));
+          return;
+        }
+        const client = this.oauthManager.getClient(clientId);
+        if (!client) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Unknown Client", `Client '${clientId}' is not registered`));
+          return;
+        }
+        if (!this.oauthManager.validateRedirectUri(clientId, redirectUri)) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Invalid Redirect URI", "The redirect URI is not allowed for this client"));
+          return;
+        }
+        const authCode = this.oauthManager.generateAuthorizationCode(
+          clientId,
+          redirectUri,
+          codeChallenge,
+          "S256",
+          scope
+        );
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(getAuthorizationPageHtml(client.client_name, scope, authCode.code, redirectUri, state || void 0));
+        return;
+      }
+      if (url.pathname === "/oauth/authorize/decision" && req.method === "POST") {
+        if (!this.oauthManager) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request" }));
+          return;
+        }
+        const body = await this.readRequestBody(req);
+        const params = new URLSearchParams(body);
+        const decision = params.get("decision");
+        const code = params.get("code");
+        const redirectUri = params.get("redirect_uri");
+        const state = params.get("state");
+        if (!code || !redirectUri) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(getErrorPageHtml("Invalid Request", "Missing required parameters"));
+          return;
+        }
+        const redirectUrl = new URL(redirectUri);
+        if (decision === "approve") {
+          this.oauthManager.approveAuthorizationCode(code);
+          redirectUrl.searchParams.set("code", code);
+          if (state)
+            redirectUrl.searchParams.set("state", state);
+        } else {
+          this.oauthManager.denyAuthorizationCode(code);
+          redirectUrl.searchParams.set("error", "access_denied");
+          redirectUrl.searchParams.set("error_description", "User denied the authorization request");
+          if (state)
+            redirectUrl.searchParams.set("state", state);
+        }
+        res.writeHead(302, { Location: redirectUrl.toString() });
+        res.end();
+        return;
+      }
+      if (url.pathname === "/oauth/token" && req.method === "POST") {
+        if (this.settings.authMethod !== "oauth" || !this.oauthManager) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request", error_description: "OAuth not enabled" }));
+          return;
+        }
+        const body = await this.readRequestBody(req);
+        const contentType = req.headers["content-type"] || "";
+        let params;
+        if (contentType.includes("application/json")) {
+          const json = JSON.parse(body);
+          params = new URLSearchParams(json);
+        } else {
+          params = new URLSearchParams(body);
+        }
+        const grantType = params.get("grant_type");
+        const clientId = params.get("client_id");
+        if (!grantType || !clientId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing required parameters" }));
+          return;
+        }
+        if (grantType === "authorization_code") {
+          const code = params.get("code");
+          const redirectUri = params.get("redirect_uri");
+          const codeVerifier = params.get("code_verifier");
+          if (!code || !redirectUri || !codeVerifier) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing required parameters" }));
+            return;
+          }
+          const result = this.oauthManager.exchangeCodeForTokens(code, clientId, redirectUri, codeVerifier);
+          if ("error" in result) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(result));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({
+            access_token: result.access_token.access_token,
+            token_type: result.access_token.token_type,
+            expires_in: result.access_token.expires_in,
+            refresh_token: (_a = result.refresh_token) == null ? void 0 : _a.refresh_token,
+            scope: result.access_token.scope
+          }));
+          return;
+        }
+        if (grantType === "refresh_token") {
+          const refreshToken = params.get("refresh_token");
+          if (!refreshToken) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing refresh_token" }));
+            return;
+          }
+          const result = this.oauthManager.refreshAccessToken(refreshToken, clientId);
+          if ("error" in result) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(result));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({
+            access_token: result.access_token.access_token,
+            token_type: result.access_token.token_type,
+            expires_in: result.access_token.expires_in,
+            refresh_token: (_b = result.refresh_token) == null ? void 0 : _b.refresh_token,
+            scope: result.access_token.scope
+          }));
+          return;
+        }
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unsupported_grant_type" }));
+        return;
+      }
+      if (url.pathname === "/oauth/revoke" && req.method === "POST") {
+        if (!this.oauthManager) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request" }));
+          return;
+        }
+        const body = await this.readRequestBody(req);
+        const params = new URLSearchParams(body);
+        const token = params.get("token");
+        if (token) {
+          this.oauthManager.revokeToken(token);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ revoked: true }));
+        return;
+      }
+      const authResult = this.checkAuthentication(req);
+      if (!authResult.authenticated) {
+        const headers = { "Content-Type": "application/json" };
+        if (this.settings.authMethod === "oauth") {
+          headers["WWW-Authenticate"] = `Bearer resource_metadata="${this.getBaseUrl()}/.well-known/oauth-protected-resource"`;
+        }
+        res.writeHead(401, headers);
+        res.end(JSON.stringify({
+          error: "unauthorized",
+          error_description: authResult.error || "Invalid or missing authentication"
+        }));
+        return;
       }
       if (url.pathname === "/sse" && req.method === "GET") {
         const sessionId = this.generateSessionId();
@@ -1007,38 +1727,74 @@ data: /messages?sessionId=${sessionId}
           res.end(JSON.stringify({ error: "Session not found" }));
           return;
         }
-        let body = "";
-        req.on("data", (chunk) => body += chunk);
-        req.on("end", async () => {
-          try {
-            const request = JSON.parse(body);
-            const response = await this.handleMCPRequest(request);
-            const sseRes = this.sessions.get(sessionId);
-            if (sseRes) {
-              sseRes.write(`event: message
+        const body = await this.readRequestBody(req);
+        try {
+          const request = JSON.parse(body);
+          const response = await this.handleMCPRequest(request);
+          const sseRes = this.sessions.get(sessionId);
+          if (sseRes) {
+            sseRes.write(`event: message
 data: ${JSON.stringify(response)}
 
 `);
-            }
-            res.writeHead(202, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ status: "accepted" }));
-          } catch (error) {
-            console.error("MCP: Error handling message:", error);
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Internal server error" }));
           }
-        });
+          res.writeHead(202, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "accepted" }));
+        } catch (error) {
+          console.error("MCP: Error handling message:", error);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Internal server error" }));
+        }
         return;
       }
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Not found" }));
     });
     this.server.listen(this.settings.port, "127.0.0.1", () => {
-      console.log(`LLM Bridges MCP Server listening on http://127.0.0.1:${this.settings.port}`);
+      console.log(`LLM Bridges MCP Server listening on ${this.getBaseUrl()}`);
+      console.log(`Auth method: ${this.settings.authMethod}`);
     });
     this.server.on("error", (err) => {
       console.error("MCP Server error:", err);
       new import_obsidian2.Notice(`LLM Bridges: Server error - ${err.message}`);
+    });
+  }
+  // ===========================================================================
+  // Authentication Helpers
+  // ===========================================================================
+  checkAuthentication(req) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return { authenticated: false, error: "Missing Authorization header" };
+    }
+    if (!authHeader.startsWith("Bearer ")) {
+      return { authenticated: false, error: "Invalid authorization scheme" };
+    }
+    const token = authHeader.slice(7);
+    if (this.settings.authMethod === "apiKey") {
+      if (token === this.settings.apiKey) {
+        return { authenticated: true };
+      }
+      return { authenticated: false, error: "Invalid API key" };
+    }
+    if (this.settings.authMethod === "oauth") {
+      if (!this.oauthManager) {
+        return { authenticated: false, error: "OAuth not configured" };
+      }
+      const accessToken = this.oauthManager.validateAccessToken(token);
+      if (accessToken) {
+        return { authenticated: true };
+      }
+      return { authenticated: false, error: "Invalid or expired access token" };
+    }
+    return { authenticated: false, error: "Unknown authentication method" };
+  }
+  readRequestBody(req) {
+    return new Promise((resolve, reject) => {
+      let body = "";
+      req.on("data", (chunk) => body += chunk);
+      req.on("end", () => resolve(body));
+      req.on("error", reject);
     });
   }
   stopServer() {
@@ -1605,16 +2361,27 @@ data: ${JSON.stringify(response)}
     }
   }
   copyMCPConfig() {
-    const config = {
-      mcpServers: {
-        obsidian: {
-          url: `http://127.0.0.1:${this.settings.port}/sse`,
-          headers: {
-            Authorization: `Bearer ${this.settings.apiKey}`
+    let config;
+    if (this.settings.authMethod === "oauth") {
+      config = {
+        mcpServers: {
+          obsidian: {
+            url: `http://127.0.0.1:${this.settings.port}/sse`
           }
         }
-      }
-    };
+      };
+    } else {
+      config = {
+        mcpServers: {
+          obsidian: {
+            url: `http://127.0.0.1:${this.settings.port}/sse`,
+            headers: {
+              Authorization: `Bearer ${this.settings.apiKey}`
+            }
+          }
+        }
+      };
+    }
     navigator.clipboard.writeText(JSON.stringify(config, null, 2));
     new import_obsidian2.Notice("MCP configuration copied to clipboard!");
   }
@@ -1632,21 +2399,90 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     statusEl.createEl("p", {
       text: `MCP Server running on http://127.0.0.1:${this.plugin.settings.port}`
     });
-    new import_obsidian2.Setting(containerEl).setName("API Key").setDesc("Used to authenticate MCP requests (Bearer token)").addText(
-      (text) => text.setValue(this.plugin.settings.apiKey).setDisabled(true)
-    ).addButton(
-      (btn) => btn.setButtonText("Copy").onClick(() => {
-        navigator.clipboard.writeText(this.plugin.settings.apiKey);
-        new import_obsidian2.Notice("API Key copied!");
-      })
-    ).addButton(
-      (btn) => btn.setButtonText("Regenerate").onClick(async () => {
-        this.plugin.settings.apiKey = this.plugin.generateApiKey();
+    statusEl.createEl("p", {
+      text: `Authentication: ${this.plugin.settings.authMethod === "oauth" ? "OAuth 2.1" : "API Key"}`,
+      cls: "llm-bridges-auth-status"
+    });
+    containerEl.createEl("h3", { text: "Authentication" });
+    new import_obsidian2.Setting(containerEl).setName("Authentication Method").setDesc("Choose how clients authenticate with the MCP server").addDropdown(
+      (dropdown) => dropdown.addOption("apiKey", "API Key (Simple)").addOption("oauth", "OAuth 2.1 (Recommended for Claude)").setValue(this.plugin.settings.authMethod).onChange(async (value) => {
+        this.plugin.settings.authMethod = value;
         await this.plugin.saveSettings();
+        this.plugin.restartServer();
         this.display();
-        new import_obsidian2.Notice("API Key regenerated!");
       })
     );
+    if (this.plugin.settings.authMethod === "apiKey") {
+      new import_obsidian2.Setting(containerEl).setName("API Key").setDesc("Used to authenticate MCP requests (Bearer token)").addText(
+        (text) => text.setValue(this.plugin.settings.apiKey).setDisabled(true)
+      ).addButton(
+        (btn) => btn.setButtonText("Copy").onClick(() => {
+          navigator.clipboard.writeText(this.plugin.settings.apiKey);
+          new import_obsidian2.Notice("API Key copied!");
+        })
+      ).addButton(
+        (btn) => btn.setButtonText("Regenerate").onClick(async () => {
+          this.plugin.settings.apiKey = this.plugin.generateApiKey();
+          await this.plugin.saveSettings();
+          this.display();
+          new import_obsidian2.Notice("API Key regenerated!");
+        })
+      );
+    }
+    if (this.plugin.settings.authMethod === "oauth") {
+      const oauthSection = containerEl.createEl("div", { cls: "llm-bridges-oauth-section" });
+      oauthSection.createEl("p", {
+        text: "OAuth 2.1 is enabled. Claude Desktop will automatically authenticate using the OAuth flow.",
+        cls: "setting-item-description"
+      });
+      const endpointsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-endpoints" });
+      endpointsEl.createEl("h4", { text: "OAuth Endpoints" });
+      const endpointsList = endpointsEl.createEl("ul");
+      endpointsList.createEl("li", {
+        text: `Authorization: http://127.0.0.1:${this.plugin.settings.port}/oauth/authorize`
+      });
+      endpointsList.createEl("li", {
+        text: `Token: http://127.0.0.1:${this.plugin.settings.port}/oauth/token`
+      });
+      endpointsList.createEl("li", {
+        text: `Metadata: http://127.0.0.1:${this.plugin.settings.port}/.well-known/oauth-authorization-server`
+      });
+      new import_obsidian2.Setting(oauthSection).setName("Access Token Lifetime").setDesc("How long access tokens remain valid (in seconds)").addText(
+        (text) => text.setValue(String(this.plugin.settings.oauth.access_token_lifetime)).setPlaceholder("3600").onChange(async (value) => {
+          const lifetime = parseInt(value);
+          if (!isNaN(lifetime) && lifetime > 0) {
+            this.plugin.settings.oauth.access_token_lifetime = lifetime;
+            await this.plugin.saveSettings();
+          }
+        })
+      );
+      new import_obsidian2.Setting(oauthSection).setName("Refresh Token Lifetime").setDesc("How long refresh tokens remain valid (in seconds)").addText(
+        (text) => text.setValue(String(this.plugin.settings.oauth.refresh_token_lifetime)).setPlaceholder("604800").onChange(async (value) => {
+          const lifetime = parseInt(value);
+          if (!isNaN(lifetime) && lifetime > 0) {
+            this.plugin.settings.oauth.refresh_token_lifetime = lifetime;
+            await this.plugin.saveSettings();
+          }
+        })
+      );
+      const clientsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-clients" });
+      clientsEl.createEl("h4", { text: "Registered Clients" });
+      const clients = this.plugin.settings.oauth.clients;
+      if (clients.length === 0) {
+        clientsEl.createEl("p", {
+          text: "No clients registered. Claude Desktop will be automatically registered on first connection.",
+          cls: "setting-item-description"
+        });
+      } else {
+        const clientsList = clientsEl.createEl("ul");
+        for (const client of clients) {
+          clientsList.createEl("li", {
+            text: `${client.client_name} (${client.client_id})`
+          });
+        }
+      }
+    }
+    containerEl.createEl("h3", { text: "Server" });
     new import_obsidian2.Setting(containerEl).setName("Port").setDesc("Port for the MCP SSE server (requires restart)").addText(
       (text) => text.setValue(String(this.plugin.settings.port)).onChange(async (value) => {
         const port = parseInt(value);
@@ -1656,7 +2492,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
         }
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("Restart Server").setDesc("Apply port changes").addButton(
+    new import_obsidian2.Setting(containerEl).setName("Restart Server").setDesc("Apply settings changes").addButton(
       (btn) => btn.setButtonText("Restart").onClick(() => {
         this.plugin.restartServer();
       })
@@ -1669,7 +2505,19 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     const configEl = containerEl.createEl("pre", {
       cls: "llm-bridges-config"
     });
-    configEl.setText(`{
+    if (this.plugin.settings.authMethod === "oauth") {
+      configEl.setText(`{
+  "mcpServers": {
+    "obsidian": {
+      "url": "http://127.0.0.1:${this.plugin.settings.port}/sse"
+    }
+  }
+}
+
+Note: When using OAuth, Claude will automatically discover
+the authorization endpoints and prompt you to authorize.`);
+    } else {
+      configEl.setText(`{
   "mcpServers": {
     "obsidian": {
       "url": "http://127.0.0.1:${this.plugin.settings.port}/sse",
@@ -1679,6 +2527,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     }
   }
 }`);
+    }
     new import_obsidian2.Setting(containerEl).addButton(
       (btn) => btn.setButtonText("Copy MCP Configuration").setCta().onClick(() => this.plugin.copyMCPConfig())
     );
