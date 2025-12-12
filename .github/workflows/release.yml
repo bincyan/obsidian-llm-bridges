@@ -5,6 +5,9 @@ on:
     tags:
       - '*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -44,61 +47,45 @@ jobs:
             echo "⚠️ Warning: Tag ($TAG_VERSION) does not match manifest ($MANIFEST_VERSION)"
           fi
 
-      - name: Package plugin
+      - name: Verify build outputs
         run: |
-          mkdir -p "${{ github.event.repository.name }}"
-          cp main.js manifest.json "${{ github.event.repository.name }}/"
-          if [ -f styles.css ]; then cp styles.css "${{ github.event.repository.name }}/"; fi
-          zip -r "${{ github.event.repository.name }}.zip" "${{ github.event.repository.name }}"
+          echo "Verifying build outputs..."
+          if [ ! -f main.js ] || [ ! -s main.js ]; then
+            echo "❌ main.js not found or empty"
+            exit 1
+          fi
+          echo "✅ main.js exists: $(wc -c < main.js) bytes"
+          echo "✅ manifest.json exists: $(wc -c < manifest.json) bytes"
 
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+      - name: Create Release with Assets
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ steps.version.outputs.tag }}
-          draft: false
-          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
 
-      - name: Upload main.js
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./main.js
-          asset_name: main.js
-          asset_content_type: text/javascript
+          # Check if release exists
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG already exists, deleting..."
+            gh release delete "$TAG" --yes
+          fi
 
-      - name: Upload manifest.json
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./manifest.json
-          asset_name: manifest.json
-          asset_content_type: application/json
+          # Determine if prerelease
+          PRERELEASE_FLAG=""
+          if [[ "$TAG" == *"-"* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
 
-      - name: Upload styles.css
-        if: ${{ hashFiles('styles.css') != '' }}
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./styles.css
-          asset_name: styles.css
-          asset_content_type: text/css
+          # Prepare assets
+          ASSETS="main.js manifest.json"
+          if [ -f styles.css ]; then
+            ASSETS="$ASSETS styles.css"
+          fi
 
-      - name: Upload plugin zip
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./${{ github.event.repository.name }}.zip
-          asset_name: ${{ github.event.repository.name }}-${{ steps.version.outputs.tag }}.zip
-          asset_content_type: application/zip
+          # Create release with assets
+          gh release create "$TAG" \
+            --title "Release $TAG" \
+            --generate-notes \
+            $PRERELEASE_FLAG \
+            $ASSETS
+
+          echo "✅ Release $TAG created with assets: $ASSETS"

@@ -30,9 +30,6 @@ jobs:
       - name: Build plugin
         run: npm run build
 
-      - name: Build MCP server
-        run: npm run build:mcp
-
       - name: Run tests
         run: npm test
 
@@ -134,8 +131,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build all
-        run: npm run build:all
+      - name: Build plugin
+        run: npm run build
 
       - name: Verify build outputs
         run: |
@@ -147,15 +144,8 @@ jobs:
             exit 1
           fi
 
-          # Check MCP server exists
-          if [ ! -f dist/mcp-server.js ] || [ ! -s dist/mcp-server.js ]; then
-            echo "❌ dist/mcp-server.js not found or empty"
-            exit 1
-          fi
-
           echo "✅ Build outputs verified"
           echo "   main.js: $(wc -c < main.js) bytes"
-          echo "   dist/mcp-server.js: $(wc -c < dist/mcp-server.js) bytes"
 
       - name: Create plugin package
         run: |
@@ -172,13 +162,6 @@ jobs:
             main.js
             manifest.json
             styles.css
-          retention-days: 30
-
-      - name: Upload MCP server artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mcp-server
-          path: dist/mcp-server.js
           retention-days: 30
 
       - name: Upload release package
