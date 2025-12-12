@@ -1325,17 +1325,18 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       });
 
       // OAuth Endpoints Info
+      const baseUrl = `http://127.0.0.1:${this.plugin.settings.port}`;
       const endpointsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-endpoints" });
       endpointsEl.createEl("h4", { text: "OAuth Endpoints" });
       const endpointsList = endpointsEl.createEl("ul");
       endpointsList.createEl("li", {
-        text: `Authorization: http://127.0.0.1:${this.plugin.settings.port}/oauth/authorize`,
+        text: `Authorization: ${baseUrl}/oauth/authorize`,
       });
       endpointsList.createEl("li", {
-        text: `Token: http://127.0.0.1:${this.plugin.settings.port}/oauth/token`,
+        text: `Token: ${baseUrl}/oauth/token`,
       });
       endpointsList.createEl("li", {
-        text: `Metadata: http://127.0.0.1:${this.plugin.settings.port}/.well-known/oauth-authorization-server`,
+        text: `Metadata: ${baseUrl}/.well-known/oauth-authorization-server`,
       });
 
       // Token Lifetimes

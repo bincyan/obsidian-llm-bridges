@@ -905,12 +905,19 @@ var DEFAULT_OAUTH_SETTINGS = {
 };
 var CLAUDE_DESKTOP_CLIENT = {
   client_id: "claude-desktop",
-  client_name: "Claude Desktop",
+  client_name: "Claude Desktop MCP Connector",
   redirect_uris: [
-    "http://localhost",
-    "http://127.0.0.1"
-    // Claude uses dynamic ports, so we'll validate the host only
+    "https://claude.ai/api/oauth/callback",
+    // Claude web callback (exact match required)
+    "claude://oauth/callback"
+    // Claude desktop app deep link (exact match required)
   ],
+  grant_types: ["authorization_code"],
+  response_types: ["code"],
+  token_endpoint_auth_method: "none",
+  // Public client - no secret
+  pkce_required: true,
+  // PKCE with S256 is mandatory
   created_at: new Date().toISOString(),
   scope: "mcp:read mcp:write"
 };
@@ -966,14 +973,6 @@ var OAuthManager = class {
     const client = this.getClient(clientId);
     if (!client)
       return false;
-    if (clientId === "claude-desktop") {
-      try {
-        const url = new URL(redirectUri);
-        return url.hostname === "localhost" || url.hostname === "127.0.0.1";
-      } catch (e) {
-        return false;
-      }
-    }
     return client.redirect_uris.includes(redirectUri);
   }
   // ============================================================================
@@ -2435,17 +2434,18 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
         text: "OAuth 2.1 is enabled. Claude Desktop will automatically authenticate using the OAuth flow.",
         cls: "setting-item-description"
       });
+      const baseUrl = `http://127.0.0.1:${this.plugin.settings.port}`;
       const endpointsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-endpoints" });
       endpointsEl.createEl("h4", { text: "OAuth Endpoints" });
       const endpointsList = endpointsEl.createEl("ul");
       endpointsList.createEl("li", {
-        text: `Authorization: http://127.0.0.1:${this.plugin.settings.port}/oauth/authorize`
+        text: `Authorization: ${baseUrl}/oauth/authorize`
       });
       endpointsList.createEl("li", {
-        text: `Token: http://127.0.0.1:${this.plugin.settings.port}/oauth/token`
+        text: `Token: ${baseUrl}/oauth/token`
       });
       endpointsList.createEl("li", {
-        text: `Metadata: http://127.0.0.1:${this.plugin.settings.port}/.well-known/oauth-authorization-server`
+        text: `Metadata: ${baseUrl}/.well-known/oauth-authorization-server`
       });
       new import_obsidian2.Setting(oauthSection).setName("Access Token Lifetime").setDesc("How long access tokens remain valid (in seconds)").addText(
         (text) => text.setValue(String(this.plugin.settings.oauth.access_token_lifetime)).setPlaceholder("3600").onChange(async (value) => {
