@@ -63,14 +63,15 @@ export const DEFAULT_OAUTH_SETTINGS: OAuthSettings = {
   authorization_code_lifetime: 600,
 };
 
-// Claude Desktop well-known client
+// Claude Desktop well-known client (per MCP Authorization Specification)
 export const CLAUDE_DESKTOP_CLIENT: OAuthClient = {
   client_id: 'claude-desktop',
-  client_name: 'Claude Desktop',
+  client_name: 'Claude Desktop MCP Connector',
   redirect_uris: [
-    'http://localhost',
-    'http://127.0.0.1',
-    // Claude uses dynamic ports, so we'll validate the host only
+    'https://claude.ai/api/oauth/callback',  // Claude web callback
+    'claude://oauth/callback',                // Claude desktop app callback
+    'http://localhost',                       // Local callback (dynamic port)
+    'http://127.0.0.1',                       // Local callback (dynamic port)
   ],
   created_at: new Date().toISOString(),
   scope: 'mcp:read mcp:write',
@@ -174,11 +175,26 @@ export class OAuthManager {
     const client = this.getClient(clientId);
     if (!client) return false;
 
-    // For Claude Desktop, validate host only (dynamic ports)
+    // For Claude Desktop, handle multiple redirect URI patterns
     if (clientId === 'claude-desktop') {
       try {
+        // Check exact matches first (claude.ai callback, claude:// scheme)
+        if (client.redirect_uris.includes(redirectUri)) {
+          return true;
+        }
+
+        // For localhost callbacks, validate host only (dynamic ports)
         const url = new URL(redirectUri);
-        return url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+        if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+          return true;
+        }
+
+        // Check claude:// custom scheme
+        if (redirectUri.startsWith('claude://')) {
+          return true;
+        }
+
+        return false;
       } catch {
         return false;
       }

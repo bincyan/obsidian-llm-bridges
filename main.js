@@ -905,11 +905,16 @@ var DEFAULT_OAUTH_SETTINGS = {
 };
 var CLAUDE_DESKTOP_CLIENT = {
   client_id: "claude-desktop",
-  client_name: "Claude Desktop",
+  client_name: "Claude Desktop MCP Connector",
   redirect_uris: [
+    "https://claude.ai/api/oauth/callback",
+    // Claude web callback
+    "claude://oauth/callback",
+    // Claude desktop app callback
     "http://localhost",
+    // Local callback (dynamic port)
     "http://127.0.0.1"
-    // Claude uses dynamic ports, so we'll validate the host only
+    // Local callback (dynamic port)
   ],
   created_at: new Date().toISOString(),
   scope: "mcp:read mcp:write"
@@ -968,8 +973,17 @@ var OAuthManager = class {
       return false;
     if (clientId === "claude-desktop") {
       try {
+        if (client.redirect_uris.includes(redirectUri)) {
+          return true;
+        }
         const url = new URL(redirectUri);
-        return url.hostname === "localhost" || url.hostname === "127.0.0.1";
+        if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
+          return true;
+        }
+        if (redirectUri.startsWith("claude://")) {
+          return true;
+        }
+        return false;
       } catch (e) {
         return false;
       }
