@@ -289,6 +289,23 @@ export default class LLMBridgesPlugin extends Plugin {
         return;
       }
 
+      // OpenAPI Specification (for ChatGPT Actions import)
+      // This well-known endpoint makes it easy for ChatGPT to discover the API schema
+      if (url.pathname === "/.well-known/openapi.json" && req.method === "GET") {
+        if (this.openApiServer) {
+          const spec = this.openApiServer.getSpec();
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+          });
+          res.end(JSON.stringify(spec, null, 2));
+        } else {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "OpenAPI server not initialized" }));
+        }
+        return;
+      }
+
       // =========================================================================
       // OAuth 2.1 Endpoints
       // =========================================================================
@@ -1638,6 +1655,7 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       const openApiEndpointsEl = containerEl.createEl("div", { cls: "llm-bridges-openapi-endpoints" });
       openApiEndpointsEl.createEl("h4", { text: "OpenAPI Endpoints" });
       const openApiUrl = `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.openapi.port}`;
+      const mcpUrl = this.plugin.settings.publicUrl || `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`;
       const endpointsList = openApiEndpointsEl.createEl("ul");
       endpointsList.createEl("li", {
         text: `Swagger UI: ${openApiUrl}/docs`,
@@ -1645,6 +1663,25 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       endpointsList.createEl("li", {
         text: `OpenAPI Spec: ${openApiUrl}/openapi.json`,
       });
+
+      // ChatGPT Import URL section
+      openApiEndpointsEl.createEl("h4", { text: "ChatGPT Import URL" });
+      openApiEndpointsEl.createEl("p", {
+        text: "Use this URL in ChatGPT Actions → Import from URL:",
+        cls: "setting-item-description",
+      });
+      const importUrlEl = openApiEndpointsEl.createEl("code", {
+        text: `${mcpUrl}/.well-known/openapi.json`,
+        cls: "llm-bridges-import-url",
+      });
+      new Setting(openApiEndpointsEl)
+        .setName("")
+        .addButton((btn) =>
+          btn.setButtonText("Copy Import URL").onClick(() => {
+            navigator.clipboard.writeText(`${mcpUrl}/.well-known/openapi.json`);
+            new Notice("ChatGPT import URL copied!");
+          })
+        );
 
       new Setting(containerEl)
         .setName("Restart OpenAPI Server")

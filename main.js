@@ -2153,6 +2153,20 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
         res.end(JSON.stringify(metadata));
         return;
       }
+      if (url.pathname === "/.well-known/openapi.json" && req.method === "GET") {
+        if (this.openApiServer) {
+          const spec = this.openApiServer.getSpec();
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          });
+          res.end(JSON.stringify(spec, null, 2));
+        } else {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "OpenAPI server not initialized" }));
+        }
+        return;
+      }
       if (url.pathname === "/oauth/authorize" && req.method === "GET") {
         if (this.settings.authMethod !== "oauth" || !this.oauthManager) {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -3237,6 +3251,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
       const openApiEndpointsEl = containerEl.createEl("div", { cls: "llm-bridges-openapi-endpoints" });
       openApiEndpointsEl.createEl("h4", { text: "OpenAPI Endpoints" });
       const openApiUrl = `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.openapi.port}`;
+      const mcpUrl = this.plugin.settings.publicUrl || `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`;
       const endpointsList = openApiEndpointsEl.createEl("ul");
       endpointsList.createEl("li", {
         text: `Swagger UI: ${openApiUrl}/docs`
@@ -3244,6 +3259,21 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
       endpointsList.createEl("li", {
         text: `OpenAPI Spec: ${openApiUrl}/openapi.json`
       });
+      openApiEndpointsEl.createEl("h4", { text: "ChatGPT Import URL" });
+      openApiEndpointsEl.createEl("p", {
+        text: "Use this URL in ChatGPT Actions \u2192 Import from URL:",
+        cls: "setting-item-description"
+      });
+      const importUrlEl = openApiEndpointsEl.createEl("code", {
+        text: `${mcpUrl}/.well-known/openapi.json`,
+        cls: "llm-bridges-import-url"
+      });
+      new import_obsidian2.Setting(openApiEndpointsEl).setName("").addButton(
+        (btn) => btn.setButtonText("Copy Import URL").onClick(() => {
+          navigator.clipboard.writeText(`${mcpUrl}/.well-known/openapi.json`);
+          new import_obsidian2.Notice("ChatGPT import URL copied!");
+        })
+      );
       new import_obsidian2.Setting(containerEl).setName("Restart OpenAPI Server").setDesc("Apply OpenAPI settings changes").addButton(
         (btn) => btn.setButtonText("Restart").onClick(() => {
           this.plugin.restartOpenAPIServer();
