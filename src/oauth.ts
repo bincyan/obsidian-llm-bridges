@@ -57,6 +57,7 @@ export interface OAuthSettings {
   access_token_lifetime: number; // seconds, default 3600 (1 hour)
   refresh_token_lifetime: number; // seconds, default 604800 (7 days)
   authorization_code_lifetime: number; // seconds, default 600 (10 minutes)
+  chatgpt_gpt_id: string; // ChatGPT Custom GPT ID (e.g., "g-abc123")
 }
 
 export const DEFAULT_OAUTH_SETTINGS: OAuthSettings = {
@@ -65,6 +66,7 @@ export const DEFAULT_OAUTH_SETTINGS: OAuthSettings = {
   access_token_lifetime: 3600,
   refresh_token_lifetime: 604800,
   authorization_code_lifetime: 600,
+  chatgpt_gpt_id: '', // Set this to your Custom GPT ID (e.g., "g-abc123")
 };
 
 // Claude Desktop well-known client (per MCP Authorization Specification)
@@ -83,6 +85,40 @@ export const CLAUDE_DESKTOP_CLIENT: OAuthClient = {
   created_at: new Date().toISOString(),
   scope: 'mcp:read mcp:write',
 };
+
+/**
+ * Create a ChatGPT Custom GPT OAuth client with the specified GPT ID.
+ * ChatGPT Actions use OAuth 2.0 with PKCE for authentication.
+ *
+ * @param gptId - The GPT ID (e.g., "g-abc123XYZ")
+ * @returns OAuthClient configured for ChatGPT
+ */
+export function createChatGPTClient(gptId: string): OAuthClient {
+  // ChatGPT uses two possible callback domains
+  const redirectUris = [
+    `https://chat.openai.com/aip/${gptId}/oauth/callback`,
+    `https://chatgpt.com/aip/${gptId}/oauth/callback`,
+  ];
+
+  return {
+    client_id: `chatgpt-${gptId}`,
+    client_name: `ChatGPT Custom GPT (${gptId})`,
+    redirect_uris: redirectUris,
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',  // Public client - using PKCE
+    pkce_required: true,                  // PKCE with S256 is required
+    created_at: new Date().toISOString(),
+    scope: 'mcp:read mcp:write',
+  };
+}
+
+/**
+ * Check if a client ID belongs to a ChatGPT client
+ */
+export function isChatGPTClient(clientId: string): boolean {
+  return clientId.startsWith('chatgpt-');
+}
 
 // ============================================================================
 // OAuth 2.1 Authorization Server Metadata (RFC 8414)
@@ -152,10 +188,45 @@ export class OAuthManager {
     this.settings = settings;
     this.saveCallback = saveCallback;
 
-    // Pre-register Claude Desktop client if OAuth is enabled
-    if (settings.enabled && !settings.clients.find(c => c.client_id === 'claude-desktop')) {
-      this.registerClient(CLAUDE_DESKTOP_CLIENT);
+    // Pre-register OAuth clients if OAuth is enabled
+    if (settings.enabled) {
+      // Register Claude Desktop client
+      if (!settings.clients.find(c => c.client_id === 'claude-desktop')) {
+        this.registerClient(CLAUDE_DESKTOP_CLIENT);
+      }
+
+      // Register ChatGPT client if GPT ID is configured
+      if (settings.chatgpt_gpt_id) {
+        this.registerOrUpdateChatGPTClient(settings.chatgpt_gpt_id);
+      }
     }
+  }
+
+  /**
+   * Register or update the ChatGPT client with the given GPT ID.
+   * This ensures the redirect URIs match the current GPT ID.
+   */
+  async registerOrUpdateChatGPTClient(gptId: string): Promise<OAuthClient | null> {
+    if (!gptId) return null;
+
+    const newClientId = `chatgpt-${gptId}`;
+
+    // Remove any existing ChatGPT clients with different GPT IDs
+    this.settings.clients = this.settings.clients.filter(c =>
+      !isChatGPTClient(c.client_id) || c.client_id === newClientId
+    );
+
+    // Check if the client already exists
+    const existing = this.settings.clients.find(c => c.client_id === newClientId);
+    if (existing) {
+      return existing;
+    }
+
+    // Create and register the new ChatGPT client
+    const chatgptClient = createChatGPTClient(gptId);
+    this.settings.clients.push(chatgptClient);
+    await this.saveCallback(this.settings);
+    return chatgptClient;
   }
 
   // ============================================================================
@@ -450,15 +521,37 @@ export class OAuthManager {
   async setEnabled(enabled: boolean): Promise<void> {
     this.settings.enabled = enabled;
 
-    // Add Claude Desktop client when enabling
-    if (enabled && !this.settings.clients.find(c => c.client_id === 'claude-desktop')) {
-      this.settings.clients.push({
-        ...CLAUDE_DESKTOP_CLIENT,
-        created_at: new Date().toISOString(),
-      });
+    if (enabled) {
+      // Add Claude Desktop client when enabling
+      if (!this.settings.clients.find(c => c.client_id === 'claude-desktop')) {
+        this.settings.clients.push({
+          ...CLAUDE_DESKTOP_CLIENT,
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      // Add ChatGPT client if GPT ID is configured
+      if (this.settings.chatgpt_gpt_id) {
+        await this.registerOrUpdateChatGPTClient(this.settings.chatgpt_gpt_id);
+      }
     }
 
     await this.saveCallback(this.settings);
+  }
+
+  /**
+   * Update the ChatGPT GPT ID and register/update the corresponding client.
+   */
+  async setChatGPTGptId(gptId: string): Promise<void> {
+    this.settings.chatgpt_gpt_id = gptId;
+
+    if (this.settings.enabled && gptId) {
+      await this.registerOrUpdateChatGPTClient(gptId);
+    } else if (!gptId) {
+      // Remove any existing ChatGPT clients if GPT ID is cleared
+      this.settings.clients = this.settings.clients.filter(c => !isChatGPTClient(c.client_id));
+      await this.saveCallback(this.settings);
+    }
   }
 
   getSettings(): OAuthSettings {

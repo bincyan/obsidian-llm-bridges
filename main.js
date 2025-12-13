@@ -901,7 +901,9 @@ var DEFAULT_OAUTH_SETTINGS = {
   clients: [],
   access_token_lifetime: 3600,
   refresh_token_lifetime: 604800,
-  authorization_code_lifetime: 600
+  authorization_code_lifetime: 600,
+  chatgpt_gpt_id: ""
+  // Set this to your Custom GPT ID (e.g., "g-abc123")
 };
 var CLAUDE_DESKTOP_CLIENT = {
   client_id: "claude-desktop",
@@ -921,6 +923,28 @@ var CLAUDE_DESKTOP_CLIENT = {
   created_at: new Date().toISOString(),
   scope: "mcp:read mcp:write"
 };
+function createChatGPTClient(gptId) {
+  const redirectUris = [
+    `https://chat.openai.com/aip/${gptId}/oauth/callback`,
+    `https://chatgpt.com/aip/${gptId}/oauth/callback`
+  ];
+  return {
+    client_id: `chatgpt-${gptId}`,
+    client_name: `ChatGPT Custom GPT (${gptId})`,
+    redirect_uris: redirectUris,
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none",
+    // Public client - using PKCE
+    pkce_required: true,
+    // PKCE with S256 is required
+    created_at: new Date().toISOString(),
+    scope: "mcp:read mcp:write"
+  };
+}
+function isChatGPTClient(clientId) {
+  return clientId.startsWith("chatgpt-");
+}
 function getAuthorizationServerMetadata(baseUrl) {
   return {
     issuer: baseUrl,
@@ -950,9 +974,34 @@ var OAuthManager = class {
     this.refreshTokens = /* @__PURE__ */ new Map();
     this.settings = settings;
     this.saveCallback = saveCallback;
-    if (settings.enabled && !settings.clients.find((c) => c.client_id === "claude-desktop")) {
-      this.registerClient(CLAUDE_DESKTOP_CLIENT);
+    if (settings.enabled) {
+      if (!settings.clients.find((c) => c.client_id === "claude-desktop")) {
+        this.registerClient(CLAUDE_DESKTOP_CLIENT);
+      }
+      if (settings.chatgpt_gpt_id) {
+        this.registerOrUpdateChatGPTClient(settings.chatgpt_gpt_id);
+      }
     }
+  }
+  /**
+   * Register or update the ChatGPT client with the given GPT ID.
+   * This ensures the redirect URIs match the current GPT ID.
+   */
+  async registerOrUpdateChatGPTClient(gptId) {
+    if (!gptId)
+      return null;
+    const newClientId = `chatgpt-${gptId}`;
+    this.settings.clients = this.settings.clients.filter(
+      (c) => !isChatGPTClient(c.client_id) || c.client_id === newClientId
+    );
+    const existing = this.settings.clients.find((c) => c.client_id === newClientId);
+    if (existing) {
+      return existing;
+    }
+    const chatgptClient = createChatGPTClient(gptId);
+    this.settings.clients.push(chatgptClient);
+    await this.saveCallback(this.settings);
+    return chatgptClient;
   }
   // ============================================================================
   // Client Management
@@ -1161,13 +1210,30 @@ var OAuthManager = class {
   }
   async setEnabled(enabled) {
     this.settings.enabled = enabled;
-    if (enabled && !this.settings.clients.find((c) => c.client_id === "claude-desktop")) {
-      this.settings.clients.push({
-        ...CLAUDE_DESKTOP_CLIENT,
-        created_at: new Date().toISOString()
-      });
+    if (enabled) {
+      if (!this.settings.clients.find((c) => c.client_id === "claude-desktop")) {
+        this.settings.clients.push({
+          ...CLAUDE_DESKTOP_CLIENT,
+          created_at: new Date().toISOString()
+        });
+      }
+      if (this.settings.chatgpt_gpt_id) {
+        await this.registerOrUpdateChatGPTClient(this.settings.chatgpt_gpt_id);
+      }
     }
     await this.saveCallback(this.settings);
+  }
+  /**
+   * Update the ChatGPT GPT ID and register/update the corresponding client.
+   */
+  async setChatGPTGptId(gptId) {
+    this.settings.chatgpt_gpt_id = gptId;
+    if (this.settings.enabled && gptId) {
+      await this.registerOrUpdateChatGPTClient(gptId);
+    } else if (!gptId) {
+      this.settings.clients = this.settings.clients.filter((c) => !isChatGPTClient(c.client_id));
+      await this.saveCallback(this.settings);
+    }
   }
   getSettings() {
     return { ...this.settings };
@@ -3047,6 +3113,36 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
           }
         })
       );
+      oauthSection.createEl("h4", { text: "ChatGPT Integration" });
+      oauthSection.createEl("p", {
+        text: "Configure your ChatGPT Custom GPT ID to enable OAuth authentication with ChatGPT Actions.",
+        cls: "setting-item-description"
+      });
+      new import_obsidian2.Setting(oauthSection).setName("ChatGPT GPT ID").setDesc("Your Custom GPT ID (e.g., g-abc123XYZ). Find it in the URL when editing your GPT: chatgpt.com/gpts/editor/g-xxx").addText(
+        (text) => text.setValue(this.plugin.settings.oauth.chatgpt_gpt_id).setPlaceholder("g-abc123XYZ").onChange(async (value) => {
+          const gptId = value.trim();
+          this.plugin.settings.oauth.chatgpt_gpt_id = gptId;
+          await this.plugin.saveSettings();
+          if (this.plugin.oauthManager) {
+            await this.plugin.oauthManager.setChatGPTGptId(gptId);
+          }
+          this.display();
+        })
+      );
+      if (this.plugin.settings.oauth.chatgpt_gpt_id) {
+        const gptId = this.plugin.settings.oauth.chatgpt_gpt_id;
+        const chatgptHelpEl = oauthSection.createEl("div", { cls: "llm-bridges-chatgpt-help" });
+        chatgptHelpEl.createEl("p", {
+          text: "Configure these values in your ChatGPT Custom GPT Actions:",
+          cls: "setting-item-description"
+        });
+        const helpList = chatgptHelpEl.createEl("ul", { cls: "setting-item-description" });
+        helpList.createEl("li", { text: `Client ID: chatgpt-${gptId}` });
+        helpList.createEl("li", { text: `Authorization URL: ${baseUrl}/oauth/authorize` });
+        helpList.createEl("li", { text: `Token URL: ${baseUrl}/oauth/token` });
+        helpList.createEl("li", { text: "Scope: mcp:read mcp:write" });
+        helpList.createEl("li", { text: "Token Exchange Method: POST request" });
+      }
       const clientsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-clients" });
       clientsEl.createEl("h4", { text: "Registered Clients" });
       const clients = this.plugin.settings.oauth.clients;

@@ -133,10 +133,31 @@ ChatGPT can connect to your vault using the OpenAPI server, which exposes all to
    ```
    https://your-domain.com/openapi.json
    ```
-4. Configure authentication:
+4. Configure authentication (choose one method):
+
+##### Option A: API Key Authentication (Simple)
    - **Authentication Type**: API Key
    - **Auth Type**: Bearer
    - **API Key**: Your API key from plugin settings
+
+##### Option B: OAuth 2.0 Authentication (Recommended)
+
+OAuth provides better security with automatic token refresh and granular permissions.
+
+1. In Obsidian plugin settings:
+   - Set **Authentication Method** to "OAuth 2.1"
+   - Enter your **ChatGPT GPT ID** (find it in the URL when editing your GPT: `chatgpt.com/gpts/editor/g-xxx`)
+
+2. In ChatGPT Actions configuration:
+   - **Authentication Type**: OAuth
+   - **Client ID**: `chatgpt-{your-gpt-id}` (shown in plugin settings)
+   - **Client Secret**: Leave empty (uses PKCE)
+   - **Authorization URL**: `https://your-domain.com/oauth/authorize`
+   - **Token URL**: `https://your-domain.com/oauth/token`
+   - **Scope**: `mcp:read mcp:write`
+   - **Token Exchange Method**: POST request
+
+3. When you first use the GPT, you'll be redirected to authorize access to your vault.
 
 #### OpenAPI Endpoints
 
@@ -228,11 +249,14 @@ Open the plugin settings in Obsidian to:
 
 ## Security
 
-- Server runs locally on 127.0.0.1 only
-- All requests require API key authentication (Bearer token)
+- Server runs locally on 127.0.0.1 only (configurable)
+- Two authentication methods supported:
+  - **API Key**: Simple Bearer token authentication
+  - **OAuth 2.1**: Secure OAuth flow with PKCE for both Claude and ChatGPT
 - No data leaves your machine except to the LLM you're using
 - HTTPS encryption available via reverse proxy
 - You control what the LLM can access
+- OAuth tokens automatically expire and refresh
 
 ## Development
 

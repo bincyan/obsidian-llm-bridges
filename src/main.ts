@@ -1449,6 +1449,48 @@ class LLMBridgesSettingTab extends PluginSettingTab {
             })
         );
 
+      // ChatGPT GPT ID
+      oauthSection.createEl("h4", { text: "ChatGPT Integration" });
+      oauthSection.createEl("p", {
+        text: "Configure your ChatGPT Custom GPT ID to enable OAuth authentication with ChatGPT Actions.",
+        cls: "setting-item-description",
+      });
+
+      new Setting(oauthSection)
+        .setName("ChatGPT GPT ID")
+        .setDesc("Your Custom GPT ID (e.g., g-abc123XYZ). Find it in the URL when editing your GPT: chatgpt.com/gpts/editor/g-xxx")
+        .addText((text) =>
+          text
+            .setValue(this.plugin.settings.oauth.chatgpt_gpt_id)
+            .setPlaceholder("g-abc123XYZ")
+            .onChange(async (value) => {
+              const gptId = value.trim();
+              this.plugin.settings.oauth.chatgpt_gpt_id = gptId;
+              await this.plugin.saveSettings();
+              // Update the ChatGPT client registration
+              if (this.plugin.oauthManager) {
+                await this.plugin.oauthManager.setChatGPTGptId(gptId);
+              }
+              this.display(); // Refresh to show updated clients list
+            })
+        );
+
+      // Show ChatGPT OAuth configuration help
+      if (this.plugin.settings.oauth.chatgpt_gpt_id) {
+        const gptId = this.plugin.settings.oauth.chatgpt_gpt_id;
+        const chatgptHelpEl = oauthSection.createEl("div", { cls: "llm-bridges-chatgpt-help" });
+        chatgptHelpEl.createEl("p", {
+          text: "Configure these values in your ChatGPT Custom GPT Actions:",
+          cls: "setting-item-description",
+        });
+        const helpList = chatgptHelpEl.createEl("ul", { cls: "setting-item-description" });
+        helpList.createEl("li", { text: `Client ID: chatgpt-${gptId}` });
+        helpList.createEl("li", { text: `Authorization URL: ${baseUrl}/oauth/authorize` });
+        helpList.createEl("li", { text: `Token URL: ${baseUrl}/oauth/token` });
+        helpList.createEl("li", { text: "Scope: mcp:read mcp:write" });
+        helpList.createEl("li", { text: "Token Exchange Method: POST request" });
+      }
+
       // Registered Clients
       const clientsEl = oauthSection.createEl("div", { cls: "llm-bridges-oauth-clients" });
       clientsEl.createEl("h4", { text: "Registered Clients" });
