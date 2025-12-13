@@ -131,8 +131,10 @@ ChatGPT can connect to your vault using the OpenAPI server, which exposes all to
 2. Go to **Configure** → **Actions** → **Create new action**
 3. Click **Import from URL** and enter your OpenAPI spec URL:
    ```
-   https://your-domain.com/openapi.json
+   https://your-domain.com/.well-known/openapi.json
    ```
+   > **Tip**: Copy this URL from the plugin settings under "ChatGPT Import URL"
+
 4. Configure authentication (choose one method):
 
 ##### Option A: API Key Authentication (Simple)
@@ -161,11 +163,12 @@ OAuth provides better security with automatic token refresh and granular permiss
 
 #### OpenAPI Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `/openapi.json` | OpenAPI 3.0 specification (no auth required) |
-| `/docs` | Swagger UI for interactive API testing |
-| `/api/*` | REST API endpoints (auth required) |
+| Endpoint | Port | Description |
+|----------|------|-------------|
+| `/.well-known/openapi.json` | 3100 (MCP) | **ChatGPT Import URL** - Use this for importing schema |
+| `/openapi.json` | 3101 (OpenAPI) | OpenAPI 3.0 specification |
+| `/docs` | 3101 (OpenAPI) | Swagger UI for interactive API testing |
+| `/api/*` | 3101 (OpenAPI) | REST API endpoints (auth required) |
 
 > **Note**: ChatGPT requires HTTPS. You must configure a reverse proxy with SSL certificates (see step 5).
 
