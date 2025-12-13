@@ -1812,12 +1812,13 @@ var DEFAULT_OPENAPI_SETTINGS = {
   port: 3101
 };
 var OpenAPIServer = class {
-  constructor(settings, bindAddress, toolExecutor, authChecker, vaultInfo) {
+  constructor(settings, bindAddress, publicUrl, toolExecutor, authChecker, vaultInfo) {
     this.server = null;
     this.tools = [];
     this.openApiSpec = null;
     this.settings = settings;
     this.bindAddress = bindAddress;
+    this.publicUrl = publicUrl;
     this.toolExecutor = toolExecutor;
     this.authChecker = authChecker;
     this.vaultInfo = vaultInfo;
@@ -1835,7 +1836,7 @@ var OpenAPIServer = class {
   getSpec() {
     if (!this.openApiSpec) {
       const info = this.vaultInfo();
-      const serverUrl = `http://${this.bindAddress}:${this.settings.port}`;
+      const serverUrl = this.publicUrl || `http://127.0.0.1:${this.settings.port}`;
       this.openApiSpec = generateOpenAPISpec(this.tools, serverUrl, info.version);
     }
     return this.openApiSpec;
@@ -1966,9 +1967,10 @@ var OpenAPIServer = class {
   /**
    * Update settings
    */
-  updateSettings(settings, bindAddress) {
+  updateSettings(settings, bindAddress, publicUrl) {
     this.settings = settings;
     this.bindAddress = bindAddress;
+    this.publicUrl = publicUrl;
     this.openApiSpec = null;
   }
   /**
@@ -2065,6 +2067,7 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
     this.openApiServer = new OpenAPIServer(
       this.settings.openapi,
       this.settings.bindAddress,
+      this.getOpenAPIPublicUrl(),
       toolExecutor,
       authChecker,
       vaultInfo
@@ -2101,6 +2104,17 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
       return this.settings.publicUrl.replace(/\/$/, "");
     }
     return `http://${this.settings.bindAddress}:${this.settings.port}`;
+  }
+  getOpenAPIPublicUrl() {
+    if (this.settings.publicUrl) {
+      try {
+        const url = new URL(this.settings.publicUrl);
+        url.port = String(this.settings.openapi.port);
+        return url.toString().replace(/\/$/, "");
+      } catch (e) {
+      }
+    }
+    return `http://127.0.0.1:${this.settings.openapi.port}`;
   }
   startServer() {
     if (this.server) {
@@ -2385,7 +2399,7 @@ data: ${JSON.stringify(response)}
       new import_obsidian2.Notice(`LLM Bridges: Server error - ${err.message}`);
     });
     if (this.openApiServer) {
-      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress);
+      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress, this.getOpenAPIPublicUrl());
       this.openApiServer.start();
     }
   }
@@ -2446,7 +2460,7 @@ data: ${JSON.stringify(response)}
   }
   restartOpenAPIServer() {
     if (this.openApiServer) {
-      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress);
+      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress, this.getOpenAPIPublicUrl());
       this.openApiServer.restart();
       if (this.settings.openapi.enabled) {
         new import_obsidian2.Notice(`OpenAPI server restarted on port ${this.settings.openapi.port}`);

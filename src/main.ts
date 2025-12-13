@@ -174,6 +174,7 @@ export default class LLMBridgesPlugin extends Plugin {
     this.openApiServer = new OpenAPIServer(
       this.settings.openapi,
       this.settings.bindAddress,
+      this.getOpenAPIPublicUrl(),
       toolExecutor,
       authChecker,
       vaultInfo
@@ -219,6 +220,22 @@ export default class LLMBridgesPlugin extends Plugin {
       return this.settings.publicUrl.replace(/\/$/, '');
     }
     return `http://${this.settings.bindAddress}:${this.settings.port}`;
+  }
+
+  private getOpenAPIPublicUrl(): string {
+    // For OpenAPI server, construct a proper public URL
+    // If publicUrl is set, derive the OpenAPI URL from it (different port)
+    if (this.settings.publicUrl) {
+      try {
+        const url = new URL(this.settings.publicUrl);
+        url.port = String(this.settings.openapi.port);
+        return url.toString().replace(/\/$/, '');
+      } catch {
+        // Invalid URL, fall back to localhost
+      }
+    }
+    // Default to localhost (not bind address which may be 0.0.0.0)
+    return `http://127.0.0.1:${this.settings.openapi.port}`;
   }
 
   startServer() {
@@ -586,7 +603,7 @@ export default class LLMBridgesPlugin extends Plugin {
 
     // Start OpenAPI server if enabled
     if (this.openApiServer) {
-      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress);
+      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress, this.getOpenAPIPublicUrl());
       this.openApiServer.start();
     }
   }
@@ -663,7 +680,7 @@ export default class LLMBridgesPlugin extends Plugin {
 
   restartOpenAPIServer() {
     if (this.openApiServer) {
-      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress);
+      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress, this.getOpenAPIPublicUrl());
       this.openApiServer.restart();
       if (this.settings.openapi.enabled) {
         new Notice(`OpenAPI server restarted on port ${this.settings.openapi.port}`);

@@ -531,16 +531,19 @@ export class OpenAPIServer {
   private authChecker: AuthChecker;
   private vaultInfo: VaultInfo;
   private bindAddress: string;
+  private publicUrl: string;
 
   constructor(
     settings: OpenAPISettings,
     bindAddress: string,
+    publicUrl: string,
     toolExecutor: ToolExecutor,
     authChecker: AuthChecker,
     vaultInfo: VaultInfo
   ) {
     this.settings = settings;
     this.bindAddress = bindAddress;
+    this.publicUrl = publicUrl;
     this.toolExecutor = toolExecutor;
     this.authChecker = authChecker;
     this.vaultInfo = vaultInfo;
@@ -560,7 +563,8 @@ export class OpenAPIServer {
   getSpec(): OpenAPISpec {
     if (!this.openApiSpec) {
       const info = this.vaultInfo();
-      const serverUrl = `http://${this.bindAddress}:${this.settings.port}`;
+      // Use publicUrl if set, otherwise use localhost (not bind address which may be 0.0.0.0)
+      const serverUrl = this.publicUrl || `http://127.0.0.1:${this.settings.port}`;
       this.openApiSpec = generateOpenAPISpec(this.tools, serverUrl, info.version);
     }
     return this.openApiSpec;
@@ -721,9 +725,10 @@ export class OpenAPIServer {
   /**
    * Update settings
    */
-  updateSettings(settings: OpenAPISettings, bindAddress: string): void {
+  updateSettings(settings: OpenAPISettings, bindAddress: string, publicUrl: string): void {
     this.settings = settings;
     this.bindAddress = bindAddress;
+    this.publicUrl = publicUrl;
     this.openApiSpec = null; // Regenerate spec with new server URL
   }
 
