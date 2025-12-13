@@ -38,7 +38,7 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian2 = require("obsidian");
-var http = __toESM(require("http"), 1);
+var http2 = __toESM(require("http"), 1);
 
 // src/kb-manager.ts
 var import_obsidian = require("obsidian");
@@ -1396,6 +1396,531 @@ function escapeHtml(str) {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
+// src/openapi.ts
+var http = __toESM(require("http"), 1);
+var TOOL_CATEGORIES = {
+  "list_knowledge_bases": { tag: "Knowledge Bases", description: "Knowledge Base management operations" },
+  "add_knowledge_base": { tag: "Knowledge Bases", description: "Knowledge Base management operations" },
+  "update_knowledge_base": { tag: "Knowledge Bases", description: "Knowledge Base management operations" },
+  "add_knowledge_base_folder_constraint": { tag: "Knowledge Bases", description: "Knowledge Base management operations" },
+  "list_notes": { tag: "Notes", description: "Note operations within Knowledge Bases" },
+  "create_note": { tag: "Notes", description: "Note operations within Knowledge Bases" },
+  "read_note": { tag: "Notes", description: "Note operations within Knowledge Bases" },
+  "update_note": { tag: "Notes", description: "Note operations within Knowledge Bases" },
+  "append_note": { tag: "Notes", description: "Note operations within Knowledge Bases" },
+  "move_note": { tag: "Notes", description: "Note operations within Knowledge Bases" },
+  "delete_note": { tag: "Notes", description: "Note operations within Knowledge Bases" },
+  "list_vault_files": { tag: "Vault", description: "Direct vault operations" },
+  "search_vault": { tag: "Vault", description: "Direct vault operations" },
+  "get_active_note": { tag: "Vault", description: "Direct vault operations" },
+  "list_commands": { tag: "Commands", description: "Obsidian command operations" },
+  "execute_command": { tag: "Commands", description: "Obsidian command operations" }
+};
+function generateOpenAPISpec(tools, serverUrl, version) {
+  var _a, _b, _c;
+  const paths = {};
+  const tagsSet = /* @__PURE__ */ new Set();
+  paths["/"] = {
+    get: {
+      operationId: "healthCheck",
+      summary: "Health check",
+      description: "Returns server status and version information",
+      tags: ["System"],
+      responses: {
+        "200": {
+          description: "Server is healthy",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  status: { type: "string", description: "Server status" },
+                  version: { type: "string", description: "API version" },
+                  vault: { type: "string", description: "Vault name" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  tagsSet.add("System");
+  paths["/openapi.json"] = {
+    get: {
+      operationId: "getOpenAPISpec",
+      summary: "Get OpenAPI specification",
+      description: "Returns the OpenAPI 3.0 specification document",
+      tags: ["System"],
+      security: [],
+      // No auth required
+      responses: {
+        "200": {
+          description: "OpenAPI specification",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                description: "OpenAPI 3.0 specification document"
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  for (const tool of tools) {
+    const category = TOOL_CATEGORIES[tool.name] || { tag: "Other", description: "Other operations" };
+    tagsSet.add(category.tag);
+    const path = `/api/${tool.name.replace(/_/g, "-")}`;
+    const hasRequiredParams = ((_b = (_a = tool.inputSchema.required) == null ? void 0 : _a.length) != null ? _b : 0) > 0;
+    const hasAnyParams = tool.inputSchema.properties && Object.keys(tool.inputSchema.properties).length > 0;
+    let method = "post";
+    if (tool.name.startsWith("list_") || tool.name.startsWith("get_") || tool.name.startsWith("read_") || tool.name.startsWith("search_")) {
+      method = hasRequiredParams ? "post" : "get";
+    } else if (tool.name.startsWith("delete_")) {
+      method = "delete";
+    } else if (tool.name.startsWith("update_")) {
+      method = "put";
+    }
+    const requestSchema = {
+      type: "object",
+      properties: {},
+      required: tool.inputSchema.required || []
+    };
+    if (tool.inputSchema.properties) {
+      for (const [propName, propDef] of Object.entries(tool.inputSchema.properties)) {
+        if (propDef) {
+          requestSchema.properties[propName] = {
+            type: propDef.type,
+            description: propDef.description,
+            default: propDef.default,
+            enum: propDef.enum
+          };
+        }
+      }
+    }
+    const operation = {
+      operationId: tool.name,
+      summary: tool.description,
+      description: generateDetailedDescription(tool),
+      tags: [category.tag],
+      security: [{ BearerAuth: [] }],
+      responses: {
+        "200": {
+          description: "Successful operation",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  success: { type: "boolean" },
+                  data: { type: "object", description: "Operation result" }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          description: "Bad request - validation failed",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  error: { type: "string" },
+                  details: { type: "string" }
+                }
+              }
+            }
+          }
+        },
+        "401": {
+          description: "Unauthorized - missing or invalid authentication"
+        },
+        "404": {
+          description: "Resource not found"
+        },
+        "500": {
+          description: "Internal server error"
+        }
+      }
+    };
+    if ((method === "post" || method === "put") && hasAnyParams) {
+      operation.requestBody = {
+        required: hasRequiredParams,
+        content: {
+          "application/json": {
+            schema: requestSchema
+          }
+        }
+      };
+    }
+    if (method === "get" && hasAnyParams) {
+      operation.parameters = [];
+      if (tool.inputSchema.properties) {
+        for (const [propName, propDef] of Object.entries(tool.inputSchema.properties)) {
+          if (propDef) {
+            operation.parameters.push({
+              name: propName,
+              in: "query",
+              description: propDef.description,
+              required: ((_c = tool.inputSchema.required) == null ? void 0 : _c.includes(propName)) || false,
+              schema: {
+                type: propDef.type,
+                default: propDef.default
+              }
+            });
+          }
+        }
+      }
+    }
+    if (method === "delete" && hasAnyParams) {
+      operation.requestBody = {
+        required: hasRequiredParams,
+        content: {
+          "application/json": {
+            schema: requestSchema
+          }
+        }
+      };
+    }
+    paths[path] = { [method]: operation };
+  }
+  const tags = Array.from(tagsSet).map((tag) => ({
+    name: tag,
+    description: getTagDescription(tag)
+  }));
+  return {
+    openapi: "3.0.3",
+    info: {
+      title: "LLM Bridges API",
+      version,
+      description: `REST API for interacting with Obsidian vault through LLM Bridges.
+
+This API exposes the same functionality as the MCP (Model Context Protocol) tools,
+but through standard REST endpoints with OpenAPI documentation.
+
+## Authentication
+
+All endpoints (except /openapi.json) require Bearer token authentication.
+Include your API key in the Authorization header:
+
+\`\`\`
+Authorization: Bearer your-api-key
+\`\`\`
+
+## Categories
+
+- **Knowledge Bases**: Manage named collections of notes with validation rules
+- **Notes**: CRUD operations on notes within Knowledge Bases
+- **Vault**: Direct vault operations (file listing, search)
+- **Commands**: Execute Obsidian commands`
+    },
+    servers: [
+      {
+        url: serverUrl,
+        description: "OpenAPI Server"
+      }
+    ],
+    paths,
+    components: {
+      securitySchemes: {
+        BearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          description: "API Key or OAuth access token"
+        }
+      },
+      schemas: {
+        KnowledgeBase: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Unique name for the Knowledge Base" },
+            description: { type: "string", description: "Human-readable description" },
+            subfolder: { type: "string", description: "Root folder path in the vault" },
+            organization_rules: { type: "string", description: "Organization rules (natural language)" }
+          }
+        },
+        Note: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Full path to the note" },
+            content: { type: "string", description: "Note content (markdown)" }
+          }
+        },
+        ValidationResult: {
+          type: "object",
+          properties: {
+            passed: { type: "boolean" },
+            issues: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  field: { type: "string" },
+                  message: { type: "string" },
+                  severity: { type: "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    security: [{ BearerAuth: [] }],
+    tags
+  };
+}
+function generateDetailedDescription(tool) {
+  var _a;
+  let desc = tool.description;
+  if (tool.inputSchema.properties && Object.keys(tool.inputSchema.properties).length > 0) {
+    desc += "\n\n**Parameters:**\n";
+    for (const [name, prop] of Object.entries(tool.inputSchema.properties)) {
+      if (prop) {
+        const required = ((_a = tool.inputSchema.required) == null ? void 0 : _a.includes(name)) ? " (required)" : " (optional)";
+        desc += `- \`${name}\`${required}: ${prop.description || prop.type}
+`;
+      }
+    }
+  }
+  return desc;
+}
+function getTagDescription(tag) {
+  const descriptions = {
+    "System": "System endpoints for health checks and API documentation",
+    "Knowledge Bases": "Manage Knowledge Bases - named collections of notes with folder constraints and validation rules",
+    "Notes": "CRUD operations on notes within Knowledge Bases, with automatic validation against folder constraints",
+    "Vault": "Direct Obsidian vault operations - file listing, search, and active note access",
+    "Commands": "Execute Obsidian commands programmatically",
+    "Other": "Miscellaneous operations"
+  };
+  return descriptions[tag] || tag;
+}
+function getSwaggerUIHtml(openApiUrl, title) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title}</title>
+  <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    html { box-sizing: border-box; overflow-y: scroll; }
+    *, *:before, *:after { box-sizing: inherit; }
+    body { margin: 0; background: #fafafa; }
+    .swagger-ui .topbar { display: none; }
+    .swagger-ui .info { margin: 20px 0; }
+    .swagger-ui .info .title { font-size: 2em; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"><\/script>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"><\/script>
+  <script>
+    window.onload = function() {
+      window.ui = SwaggerUIBundle({
+        url: "${openApiUrl}",
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset
+        ],
+        plugins: [
+          SwaggerUIBundle.plugins.DownloadUrl
+        ],
+        layout: "StandaloneLayout",
+        persistAuthorization: true,
+        tryItOutEnabled: true,
+      });
+    };
+  <\/script>
+</body>
+</html>`;
+}
+var DEFAULT_OPENAPI_SETTINGS = {
+  enabled: false,
+  port: 3101
+};
+var OpenAPIServer = class {
+  constructor(settings, bindAddress, toolExecutor, authChecker, vaultInfo) {
+    this.server = null;
+    this.tools = [];
+    this.openApiSpec = null;
+    this.settings = settings;
+    this.bindAddress = bindAddress;
+    this.toolExecutor = toolExecutor;
+    this.authChecker = authChecker;
+    this.vaultInfo = vaultInfo;
+  }
+  /**
+   * Update tools list and regenerate OpenAPI spec
+   */
+  setTools(tools) {
+    this.tools = tools;
+    this.openApiSpec = null;
+  }
+  /**
+   * Get the OpenAPI specification
+   */
+  getSpec() {
+    if (!this.openApiSpec) {
+      const info = this.vaultInfo();
+      const serverUrl = `http://${this.bindAddress}:${this.settings.port}`;
+      this.openApiSpec = generateOpenAPISpec(this.tools, serverUrl, info.version);
+    }
+    return this.openApiSpec;
+  }
+  /**
+   * Start the OpenAPI server
+   */
+  start() {
+    if (this.server) {
+      this.server.close();
+    }
+    if (!this.settings.enabled) {
+      console.log("OpenAPI server is disabled");
+      return;
+    }
+    this.server = http.createServer(async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      const url = new URL(req.url || "/", `http://${this.bindAddress}:${this.settings.port}`);
+      const pathname = url.pathname;
+      try {
+        if (pathname === "/openapi.json" && req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(this.getSpec(), null, 2));
+          return;
+        }
+        if (pathname === "/docs" && req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end(getSwaggerUIHtml("/openapi.json", "LLM Bridges API"));
+          return;
+        }
+        if (pathname === "/" && req.method === "GET") {
+          const info = this.vaultInfo();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            status: "ok",
+            version: info.version,
+            vault: info.name,
+            openapi: true
+          }));
+          return;
+        }
+        const authResult = this.authChecker(req.headers.authorization);
+        if (!authResult.authenticated) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            error: "unauthorized",
+            error_description: authResult.error || "Invalid or missing authentication"
+          }));
+          return;
+        }
+        if (pathname.startsWith("/api/")) {
+          const toolName = pathname.slice(5).replace(/-/g, "_");
+          const tool = this.tools.find((t) => t.name === toolName);
+          if (!tool) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Tool not found", tool: toolName }));
+            return;
+          }
+          let args = {};
+          if (req.method === "GET") {
+            for (const [key, value] of url.searchParams) {
+              args[key] = value;
+            }
+          } else {
+            const body = await this.readRequestBody(req);
+            if (body) {
+              try {
+                args = JSON.parse(body);
+              } catch (e) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "Invalid JSON body" }));
+                return;
+              }
+            }
+          }
+          try {
+            const result = await this.toolExecutor(toolName, args);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ success: true, data: result }));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const statusCode = message.includes("not found") ? 404 : 400;
+            res.writeHead(statusCode, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: message }));
+          }
+          return;
+        }
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Not found" }));
+      } catch (error) {
+        console.error("OpenAPI server error:", error);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    this.server.listen(this.settings.port, this.bindAddress, () => {
+      console.log(`OpenAPI server running at http://${this.bindAddress}:${this.settings.port}`);
+      console.log(`Swagger UI: http://${this.bindAddress}:${this.settings.port}/docs`);
+      console.log(`OpenAPI spec: http://${this.bindAddress}:${this.settings.port}/openapi.json`);
+    });
+    this.server.on("error", (err) => {
+      console.error("OpenAPI server error:", err);
+    });
+  }
+  /**
+   * Stop the server
+   */
+  stop() {
+    if (this.server) {
+      this.server.close();
+      this.server = null;
+    }
+  }
+  /**
+   * Restart the server
+   */
+  restart() {
+    this.stop();
+    this.start();
+  }
+  /**
+   * Update settings
+   */
+  updateSettings(settings, bindAddress) {
+    this.settings = settings;
+    this.bindAddress = bindAddress;
+    this.openApiSpec = null;
+  }
+  /**
+   * Check if server is running
+   */
+  isRunning() {
+    return this.server !== null && this.server.listening;
+  }
+  readRequestBody(req) {
+    return new Promise((resolve, reject) => {
+      let body = "";
+      req.on("data", (chunk) => body += chunk);
+      req.on("end", () => resolve(body));
+      req.on("error", reject);
+    });
+  }
+};
+
 // src/main.ts
 var DEFAULT_SETTINGS = {
   bindAddress: "127.0.0.1",
@@ -1404,7 +1929,8 @@ var DEFAULT_SETTINGS = {
   port: 3100,
   apiKey: "",
   authMethod: "apiKey",
-  oauth: DEFAULT_OAUTH_SETTINGS
+  oauth: DEFAULT_OAUTH_SETTINGS,
+  openapi: DEFAULT_OPENAPI_SETTINGS
 };
 var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
   constructor() {
@@ -1412,6 +1938,7 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
     this.server = null;
     this.sessions = /* @__PURE__ */ new Map();
     this.oauthManager = null;
+    this.openApiServer = null;
     this.tokenCleanupInterval = null;
   }
   async onload() {
@@ -1422,6 +1949,7 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
       await this.saveSettings();
     }
     this.initOAuthManager();
+    this.initOpenAPIServer();
     this.tokenCleanupInterval = setInterval(() => {
       var _a;
       (_a = this.oauthManager) == null ? void 0 : _a.cleanupExpiredTokens();
@@ -1453,11 +1981,37 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
       }
     );
   }
+  initOpenAPIServer() {
+    const toolExecutor = async (name, args) => {
+      var _a;
+      const result = await this.handleMCPToolCall({ name, arguments: args });
+      const text = (_a = result.content[0]) == null ? void 0 : _a.text;
+      return text ? JSON.parse(text) : null;
+    };
+    const authChecker = (authHeader) => {
+      const mockReq = { headers: { authorization: authHeader } };
+      return this.checkAuthentication(mockReq);
+    };
+    const vaultInfo = () => ({
+      name: this.app.vault.getName(),
+      version: this.manifest.version
+    });
+    this.openApiServer = new OpenAPIServer(
+      this.settings.openapi,
+      this.settings.bindAddress,
+      toolExecutor,
+      authChecker,
+      vaultInfo
+    );
+    this.openApiServer.setTools(this.getMCPTools());
+  }
   onunload() {
+    var _a;
     if (this.tokenCleanupInterval) {
       clearInterval(this.tokenCleanupInterval);
     }
     this.stopServer();
+    (_a = this.openApiServer) == null ? void 0 : _a.stop();
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -1486,7 +2040,7 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
     if (this.server) {
       this.server.close();
     }
-    this.server = http.createServer(async (req, res) => {
+    this.server = http2.createServer(async (req, res) => {
       var _a, _b;
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -1764,6 +2318,10 @@ data: ${JSON.stringify(response)}
       console.error("MCP Server error:", err);
       new import_obsidian2.Notice(`LLM Bridges: Server error - ${err.message}`);
     });
+    if (this.openApiServer) {
+      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress);
+      this.openApiServer.start();
+    }
   }
   // ===========================================================================
   // Authentication Helpers
@@ -1814,9 +2372,20 @@ data: ${JSON.stringify(response)}
     }
   }
   restartServer() {
+    var _a;
     this.stopServer();
+    (_a = this.openApiServer) == null ? void 0 : _a.stop();
     this.startServer();
     new import_obsidian2.Notice(`LLM Bridges restarted on port ${this.settings.port}`);
+  }
+  restartOpenAPIServer() {
+    if (this.openApiServer) {
+      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress);
+      this.openApiServer.restart();
+      if (this.settings.openapi.enabled) {
+        new import_obsidian2.Notice(`OpenAPI server restarted on port ${this.settings.openapi.port}`);
+      }
+    }
   }
   generateSessionId() {
     return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
@@ -2398,6 +2967,7 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
     this.plugin = plugin;
   }
   display() {
+    var _a;
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "LLM Bridges Settings" });
@@ -2523,6 +3093,73 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
         this.plugin.restartServer();
       })
     );
+    containerEl.createEl("h3", { text: "OpenAPI Server" });
+    const openApiStatusEl = containerEl.createEl("div", { cls: "llm-bridges-openapi-status" });
+    if (this.plugin.settings.openapi.enabled && ((_a = this.plugin.openApiServer) == null ? void 0 : _a.isRunning())) {
+      openApiStatusEl.createEl("p", {
+        text: `OpenAPI server running on port ${this.plugin.settings.openapi.port}`,
+        cls: "llm-bridges-status-running"
+      });
+    } else {
+      openApiStatusEl.createEl("p", {
+        text: "OpenAPI server is disabled",
+        cls: "llm-bridges-status-disabled"
+      });
+    }
+    new import_obsidian2.Setting(containerEl).setName("Enable OpenAPI Server").setDesc("Expose MCP tools as REST API with Swagger UI documentation").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.openapi.enabled).onChange(async (value) => {
+        this.plugin.settings.openapi.enabled = value;
+        await this.plugin.saveSettings();
+        this.plugin.restartOpenAPIServer();
+        this.display();
+      })
+    );
+    if (this.plugin.settings.openapi.enabled) {
+      new import_obsidian2.Setting(containerEl).setName("OpenAPI Port").setDesc("Port for the OpenAPI server (separate from MCP SSE port)").addText(
+        (text) => text.setValue(String(this.plugin.settings.openapi.port)).setPlaceholder("3101").onChange(async (value) => {
+          const port = parseInt(value);
+          if (!isNaN(port) && port > 0 && port < 65536) {
+            this.plugin.settings.openapi.port = port;
+            await this.plugin.saveSettings();
+          }
+        })
+      );
+      const openApiEndpointsEl = containerEl.createEl("div", { cls: "llm-bridges-openapi-endpoints" });
+      openApiEndpointsEl.createEl("h4", { text: "OpenAPI Endpoints" });
+      const openApiUrl = `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.openapi.port}`;
+      const endpointsList = openApiEndpointsEl.createEl("ul");
+      endpointsList.createEl("li", {
+        text: `Swagger UI: ${openApiUrl}/docs`
+      });
+      endpointsList.createEl("li", {
+        text: `OpenAPI Spec: ${openApiUrl}/openapi.json`
+      });
+      new import_obsidian2.Setting(containerEl).setName("Restart OpenAPI Server").setDesc("Apply OpenAPI settings changes").addButton(
+        (btn) => btn.setButtonText("Restart").onClick(() => {
+          this.plugin.restartOpenAPIServer();
+          this.display();
+        })
+      );
+      new import_obsidian2.Setting(containerEl).setName("Export OpenAPI Spec to Vault").setDesc("Save openapi.json to .llm_bridges/openapi.json in your vault").addButton(
+        (btn) => btn.setButtonText("Export").onClick(async () => {
+          if (this.plugin.openApiServer) {
+            const spec = this.plugin.openApiServer.getSpec();
+            const path = ".llm_bridges/openapi.json";
+            const folder = this.plugin.app.vault.getAbstractFileByPath(".llm_bridges");
+            if (!folder) {
+              await this.plugin.app.vault.createFolder(".llm_bridges");
+            }
+            const existingFile = this.plugin.app.vault.getAbstractFileByPath(path);
+            if (existingFile instanceof import_obsidian2.TFile) {
+              await this.plugin.app.vault.modify(existingFile, JSON.stringify(spec, null, 2));
+            } else {
+              await this.plugin.app.vault.create(path, JSON.stringify(spec, null, 2));
+            }
+            new import_obsidian2.Notice(`OpenAPI spec exported to ${path}`);
+          }
+        })
+      );
+    }
     containerEl.createEl("h3", { text: "Claude Desktop Setup" });
     const instructionsEl = containerEl.createEl("div");
     instructionsEl.createEl("p", {

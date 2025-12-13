@@ -38,6 +38,11 @@ import {
   getAuthorizationPageHtml,
   getErrorPageHtml,
 } from "./oauth";
+import {
+  OpenAPIServer,
+  OpenAPISettings,
+  DEFAULT_OPENAPI_SETTINGS,
+} from "./openapi";
 
 // MCP Protocol types
 interface MCPRequest {
@@ -63,6 +68,7 @@ interface LLMBridgesSettings {
   apiKey: string;         // API key for authentication
   authMethod: AuthMethod; // Authentication method: API Key or OAuth 2.1
   oauth: OAuthSettings;   // OAuth 2.1 settings
+  openapi: OpenAPISettings; // OpenAPI server settings
 }
 
 const DEFAULT_SETTINGS: LLMBridgesSettings = {
@@ -72,6 +78,7 @@ const DEFAULT_SETTINGS: LLMBridgesSettings = {
   apiKey: "",
   authMethod: "apiKey",
   oauth: DEFAULT_OAUTH_SETTINGS,
+  openapi: DEFAULT_OPENAPI_SETTINGS,
 };
 
 export default class LLMBridgesPlugin extends Plugin {
@@ -80,6 +87,7 @@ export default class LLMBridgesPlugin extends Plugin {
   sessions: Map<string, http.ServerResponse> = new Map();
   kbManager: KBManager;
   oauthManager: OAuthManager | null = null;
+  openApiServer: OpenAPIServer | null = null;
   tokenCleanupInterval: ReturnType<typeof setInterval> | null = null;
 
   async onload() {
@@ -94,6 +102,9 @@ export default class LLMBridgesPlugin extends Plugin {
 
     // Initialize OAuth manager
     this.initOAuthManager();
+
+    // Initialize OpenAPI server
+    this.initOpenAPIServer();
 
     // Start token cleanup interval (every 5 minutes)
     this.tokenCleanupInterval = setInterval(() => {
@@ -139,11 +150,45 @@ export default class LLMBridgesPlugin extends Plugin {
     );
   }
 
+  private initOpenAPIServer(): void {
+    // Tool executor - executes MCP tools and returns results
+    const toolExecutor = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const result = await this.handleMCPToolCall({ name, arguments: args });
+      // Parse the JSON result from the MCP tool response
+      const text = result.content[0]?.text;
+      return text ? JSON.parse(text) : null;
+    };
+
+    // Auth checker - validates authentication
+    const authChecker = (authHeader: string | undefined) => {
+      const mockReq = { headers: { authorization: authHeader } } as http.IncomingMessage;
+      return this.checkAuthentication(mockReq);
+    };
+
+    // Vault info provider
+    const vaultInfo = () => ({
+      name: this.app.vault.getName(),
+      version: this.manifest.version,
+    });
+
+    this.openApiServer = new OpenAPIServer(
+      this.settings.openapi,
+      this.settings.bindAddress,
+      toolExecutor,
+      authChecker,
+      vaultInfo
+    );
+
+    // Set the MCP tools
+    this.openApiServer.setTools(this.getMCPTools());
+  }
+
   onunload() {
     if (this.tokenCleanupInterval) {
       clearInterval(this.tokenCleanupInterval);
     }
     this.stopServer();
+    this.openApiServer?.stop();
   }
 
   async loadSettings() {
@@ -538,6 +583,12 @@ export default class LLMBridgesPlugin extends Plugin {
       console.error("MCP Server error:", err);
       new Notice(`LLM Bridges: Server error - ${err.message}`);
     });
+
+    // Start OpenAPI server if enabled
+    if (this.openApiServer) {
+      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress);
+      this.openApiServer.start();
+    }
   }
 
   // ===========================================================================
@@ -605,8 +656,19 @@ export default class LLMBridgesPlugin extends Plugin {
 
   restartServer() {
     this.stopServer();
+    this.openApiServer?.stop();
     this.startServer();
     new Notice(`LLM Bridges restarted on port ${this.settings.port}`);
+  }
+
+  restartOpenAPIServer() {
+    if (this.openApiServer) {
+      this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress);
+      this.openApiServer.restart();
+      if (this.settings.openapi.enabled) {
+        new Notice(`OpenAPI server restarted on port ${this.settings.openapi.port}`);
+      }
+    }
   }
 
   generateSessionId(): string {
@@ -1463,6 +1525,105 @@ class LLMBridgesSettingTab extends PluginSettingTab {
           this.plugin.restartServer();
         })
       );
+
+    // ===========================================================================
+    // OpenAPI Settings
+    // ===========================================================================
+    containerEl.createEl("h3", { text: "OpenAPI Server" });
+
+    const openApiStatusEl = containerEl.createEl("div", { cls: "llm-bridges-openapi-status" });
+    if (this.plugin.settings.openapi.enabled && this.plugin.openApiServer?.isRunning()) {
+      openApiStatusEl.createEl("p", {
+        text: `OpenAPI server running on port ${this.plugin.settings.openapi.port}`,
+        cls: "llm-bridges-status-running",
+      });
+    } else {
+      openApiStatusEl.createEl("p", {
+        text: "OpenAPI server is disabled",
+        cls: "llm-bridges-status-disabled",
+      });
+    }
+
+    new Setting(containerEl)
+      .setName("Enable OpenAPI Server")
+      .setDesc("Expose MCP tools as REST API with Swagger UI documentation")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.openapi.enabled)
+          .onChange(async (value) => {
+            this.plugin.settings.openapi.enabled = value;
+            await this.plugin.saveSettings();
+            this.plugin.restartOpenAPIServer();
+            this.display();
+          })
+      );
+
+    if (this.plugin.settings.openapi.enabled) {
+      new Setting(containerEl)
+        .setName("OpenAPI Port")
+        .setDesc("Port for the OpenAPI server (separate from MCP SSE port)")
+        .addText((text) =>
+          text
+            .setValue(String(this.plugin.settings.openapi.port))
+            .setPlaceholder("3101")
+            .onChange(async (value) => {
+              const port = parseInt(value);
+              if (!isNaN(port) && port > 0 && port < 65536) {
+                this.plugin.settings.openapi.port = port;
+                await this.plugin.saveSettings();
+              }
+            })
+        );
+
+      // OpenAPI Endpoints Info
+      const openApiEndpointsEl = containerEl.createEl("div", { cls: "llm-bridges-openapi-endpoints" });
+      openApiEndpointsEl.createEl("h4", { text: "OpenAPI Endpoints" });
+      const openApiUrl = `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.openapi.port}`;
+      const endpointsList = openApiEndpointsEl.createEl("ul");
+      endpointsList.createEl("li", {
+        text: `Swagger UI: ${openApiUrl}/docs`,
+      });
+      endpointsList.createEl("li", {
+        text: `OpenAPI Spec: ${openApiUrl}/openapi.json`,
+      });
+
+      new Setting(containerEl)
+        .setName("Restart OpenAPI Server")
+        .setDesc("Apply OpenAPI settings changes")
+        .addButton((btn) =>
+          btn.setButtonText("Restart").onClick(() => {
+            this.plugin.restartOpenAPIServer();
+            this.display();
+          })
+        );
+
+      new Setting(containerEl)
+        .setName("Export OpenAPI Spec to Vault")
+        .setDesc("Save openapi.json to .llm_bridges/openapi.json in your vault")
+        .addButton((btn) =>
+          btn.setButtonText("Export").onClick(async () => {
+            if (this.plugin.openApiServer) {
+              const spec = this.plugin.openApiServer.getSpec();
+              const path = ".llm_bridges/openapi.json";
+
+              // Ensure folder exists
+              const folder = this.plugin.app.vault.getAbstractFileByPath(".llm_bridges");
+              if (!folder) {
+                await this.plugin.app.vault.createFolder(".llm_bridges");
+              }
+
+              const existingFile = this.plugin.app.vault.getAbstractFileByPath(path);
+              if (existingFile instanceof TFile) {
+                await this.plugin.app.vault.modify(existingFile, JSON.stringify(spec, null, 2));
+              } else {
+                await this.plugin.app.vault.create(path, JSON.stringify(spec, null, 2));
+              }
+
+              new Notice(`OpenAPI spec exported to ${path}`);
+            }
+          })
+        );
+    }
 
     // ===========================================================================
     // Claude Desktop Setup
