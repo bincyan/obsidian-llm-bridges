@@ -115,15 +115,49 @@ Add the MCP server to your Claude configuration file:
 
 Close and reopen Claude Desktop to load the MCP server.
 
-### 4. (Optional) Configure Reverse Proxy for HTTPS
+### 4. Configure ChatGPT (Custom GPT / Actions)
+
+ChatGPT can connect to your vault using the OpenAPI server, which exposes all tools as REST API endpoints.
+
+#### Enable OpenAPI Server
+
+1. Go to plugin settings in Obsidian
+2. Enable **OpenAPI Server** (runs on port 3101 by default)
+3. Set up HTTPS via reverse proxy (see step 5) - **ChatGPT requires HTTPS**
+
+#### Set Up in ChatGPT
+
+1. Create or edit a Custom GPT at [chat.openai.com](https://chat.openai.com)
+2. Go to **Configure** → **Actions** → **Create new action**
+3. Click **Import from URL** and enter your OpenAPI spec URL:
+   ```
+   https://your-domain.com/openapi.json
+   ```
+4. Configure authentication:
+   - **Authentication Type**: API Key
+   - **Auth Type**: Bearer
+   - **API Key**: Your API key from plugin settings
+
+#### OpenAPI Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `/openapi.json` | OpenAPI 3.0 specification (no auth required) |
+| `/docs` | Swagger UI for interactive API testing |
+| `/api/*` | REST API endpoints (auth required) |
+
+> **Note**: ChatGPT requires HTTPS. You must configure a reverse proxy with SSL certificates (see step 5).
+
+### 5. (Optional) Configure Reverse Proxy for HTTPS
 
 For web-based LLMs (ChatGPT, Claude web), set up a reverse proxy with HTTPS:
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   ChatGPT /     │────▶│  Reverse Proxy  │────▶│  LLM Bridges    │
-│   Claude Web    │◀────│  (HTTPS:443)    │◀────│  (SSE:3100)     │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────────────┐
+│   ChatGPT /     │────▶│  Reverse Proxy  │────▶│  LLM Bridges Plugin     │
+│   Claude Web    │◀────│  (HTTPS:443)    │◀────│  MCP SSE:3100           │
+└─────────────────┘     └─────────────────┘     │  OpenAPI:3101           │
+                                                └─────────────────────────┘
 ```
 
 Example with Nginx:
@@ -136,6 +170,7 @@ server {
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
 
+    # MCP SSE server (Claude web)
     location / {
         proxy_pass http://127.0.0.1:3100;
         proxy_http_version 1.1;
@@ -145,10 +180,23 @@ server {
         proxy_cache off;
         chunked_transfer_encoding off;
     }
+
+    # OpenAPI server (ChatGPT)
+    location /openapi.json {
+        proxy_pass http://127.0.0.1:3101/openapi.json;
+    }
+
+    location /docs {
+        proxy_pass http://127.0.0.1:3101/docs;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:3101/api/;
+    }
 }
 ```
 
-### 5. Start Using
+### 6. Start Using
 
 You can now ask Claude to:
 
@@ -165,14 +213,17 @@ You can now ask Claude to:
 Open the plugin settings in Obsidian to:
 
 - View and copy your API key
-- Change the server port (default: 3100)
-- Copy the MCP configuration
-- Restart the server
+- Change the MCP server port (default: 3100)
+- Enable/configure the OpenAPI server (default port: 3101)
+- Copy the MCP configuration for Claude Desktop
+- Export OpenAPI spec to vault for reference
+- Restart the servers
 
 ## Requirements
 
 - Obsidian v0.15.0+
-- Claude Pro subscription (for Claude integration)
+- ChatGPT Plus subscription (for ChatGPT integration via OpenAPI)
+- Claude Pro subscription (for Claude integration via MCP)
 - Obsidian must be running for LLM access
 
 ## Security
@@ -252,13 +303,28 @@ obsidian-llm-bridges/
 3. Make sure the API key matches
 4. Restart Claude Desktop
 
+### ChatGPT can't connect
+
+1. Verify the OpenAPI server is enabled and running (check plugin settings)
+2. Ensure HTTPS is configured via reverse proxy (ChatGPT requires HTTPS)
+3. Test the OpenAPI spec URL is accessible: `https://your-domain.com/openapi.json`
+4. Verify the API key is correctly set in ChatGPT Actions
+
 ### Test the connection
 
 ```bash
+# Test MCP server (Claude)
 curl http://127.0.0.1:3100/
 ```
 
 Should return: `{"status":"ok","version":"1.0.0","vault":"Your Vault Name"}`
+
+```bash
+# Test OpenAPI server (ChatGPT)
+curl http://127.0.0.1:3101/openapi.json
+```
+
+Should return the OpenAPI 3.0 specification JSON.
 
 ## Author
 
