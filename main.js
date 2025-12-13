@@ -1469,46 +1469,6 @@ function generateOpenAPISpec(tools, serverUrl, version) {
       }
     }
   };
-  paths["/openapi/export"] = {
-    post: {
-      operationId: "exportOpenAPIToVault",
-      summary: "Export OpenAPI spec to vault",
-      description: "Saves the OpenAPI specification as a JSON file in the Obsidian vault",
-      tags: ["System"],
-      requestBody: {
-        required: false,
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                path: {
-                  type: "string",
-                  description: "Path within vault to save the file (default: .llm_bridges/openapi.json)"
-                }
-              }
-            }
-          }
-        }
-      },
-      responses: {
-        "200": {
-          description: "Export successful",
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                properties: {
-                  success: { type: "boolean" },
-                  path: { type: "string", description: "Path where file was saved" }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  };
   for (const tool of tools) {
     const category = TOOL_CATEGORIES[tool.name] || { tag: "Other", description: "Other operations" };
     tagsSet.add(category.tag);
@@ -1786,7 +1746,7 @@ var DEFAULT_OPENAPI_SETTINGS = {
   port: 3101
 };
 var OpenAPIServer = class {
-  constructor(settings, bindAddress, toolExecutor, authChecker, vaultInfo, vaultWriter) {
+  constructor(settings, bindAddress, toolExecutor, authChecker, vaultInfo) {
     this.server = null;
     this.tools = [];
     this.openApiSpec = null;
@@ -1795,7 +1755,6 @@ var OpenAPIServer = class {
     this.toolExecutor = toolExecutor;
     this.authChecker = authChecker;
     this.vaultInfo = vaultInfo;
-    this.vaultWriter = vaultWriter;
   }
   /**
    * Update tools list and regenerate OpenAPI spec
@@ -1866,23 +1825,6 @@ var OpenAPIServer = class {
             error: "unauthorized",
             error_description: authResult.error || "Invalid or missing authentication"
           }));
-          return;
-        }
-        if (pathname === "/openapi/export" && req.method === "POST") {
-          const body = await this.readRequestBody(req);
-          let exportPath = ".llm_bridges/openapi.json";
-          if (body) {
-            try {
-              const params = JSON.parse(body);
-              if (params.path) {
-                exportPath = params.path;
-              }
-            } catch (e) {
-            }
-          }
-          await this.vaultWriter(exportPath, JSON.stringify(this.getSpec(), null, 2));
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ success: true, path: exportPath }));
           return;
         }
         if (pathname.startsWith("/api/")) {
@@ -2054,25 +1996,12 @@ var LLMBridgesPlugin = class extends import_obsidian2.Plugin {
       name: this.app.vault.getName(),
       version: this.manifest.version
     });
-    const vaultWriter = async (path, content) => {
-      const folderPath = path.substring(0, path.lastIndexOf("/"));
-      if (folderPath) {
-        await this.ensureFolder(folderPath);
-      }
-      const existingFile = this.app.vault.getAbstractFileByPath(path);
-      if (existingFile instanceof import_obsidian2.TFile) {
-        await this.app.vault.modify(existingFile, content);
-      } else {
-        await this.app.vault.create(path, content);
-      }
-    };
     this.openApiServer = new OpenAPIServer(
       this.settings.openapi,
       this.settings.bindAddress,
       toolExecutor,
       authChecker,
-      vaultInfo,
-      vaultWriter
+      vaultInfo
     );
     this.openApiServer.setTools(this.getMCPTools());
   }
@@ -3204,9 +3133,6 @@ var LLMBridgesSettingTab = class extends import_obsidian2.PluginSettingTab {
       });
       endpointsList.createEl("li", {
         text: `OpenAPI Spec: ${openApiUrl}/openapi.json`
-      });
-      endpointsList.createEl("li", {
-        text: `Export to Vault: POST ${openApiUrl}/openapi/export`
       });
       new import_obsidian2.Setting(containerEl).setName("Restart OpenAPI Server").setDesc("Apply OpenAPI settings changes").addButton(
         (btn) => btn.setButtonText("Restart").onClick(() => {

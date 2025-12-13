@@ -171,29 +171,12 @@ export default class LLMBridgesPlugin extends Plugin {
       version: this.manifest.version,
     });
 
-    // Vault writer for exporting OpenAPI spec
-    const vaultWriter = async (path: string, content: string) => {
-      // Ensure parent folders exist
-      const folderPath = path.substring(0, path.lastIndexOf("/"));
-      if (folderPath) {
-        await this.ensureFolder(folderPath);
-      }
-
-      const existingFile = this.app.vault.getAbstractFileByPath(path);
-      if (existingFile instanceof TFile) {
-        await this.app.vault.modify(existingFile, content);
-      } else {
-        await this.app.vault.create(path, content);
-      }
-    };
-
     this.openApiServer = new OpenAPIServer(
       this.settings.openapi,
       this.settings.bindAddress,
       toolExecutor,
       authChecker,
-      vaultInfo,
-      vaultWriter
+      vaultInfo
     );
 
     // Set the MCP tools
@@ -1602,9 +1585,6 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       });
       endpointsList.createEl("li", {
         text: `OpenAPI Spec: ${openApiUrl}/openapi.json`,
-      });
-      endpointsList.createEl("li", {
-        text: `Export to Vault: POST ${openApiUrl}/openapi/export`,
       });
 
       new Setting(containerEl)

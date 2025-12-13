@@ -206,48 +206,6 @@ export function generateOpenAPISpec(
     },
   };
 
-  // Add export to vault endpoint
-  paths["/openapi/export"] = {
-    post: {
-      operationId: "exportOpenAPIToVault",
-      summary: "Export OpenAPI spec to vault",
-      description: "Saves the OpenAPI specification as a JSON file in the Obsidian vault",
-      tags: ["System"],
-      requestBody: {
-        required: false,
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                path: {
-                  type: "string",
-                  description: "Path within vault to save the file (default: .llm_bridges/openapi.json)",
-                },
-              },
-            },
-          },
-        },
-      },
-      responses: {
-        "200": {
-          description: "Export successful",
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                properties: {
-                  success: { type: "boolean" },
-                  path: { type: "string", description: "Path where file was saved" },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
-  };
-
   // Convert each MCP tool to an OpenAPI endpoint
   for (const tool of tools) {
     const category = TOOL_CATEGORIES[tool.name] || { tag: "Other", description: "Other operations" };
@@ -560,7 +518,6 @@ export const DEFAULT_OPENAPI_SETTINGS: OpenAPISettings = {
 export type ToolExecutor = (name: string, args: Record<string, unknown>) => Promise<unknown>;
 export type AuthChecker = (authHeader: string | undefined) => { authenticated: boolean; error?: string };
 export type VaultInfo = () => { name: string; version: string };
-export type VaultWriter = (path: string, content: string) => Promise<void>;
 
 /**
  * OpenAPI Server class - runs independently from MCP SSE server
@@ -573,7 +530,6 @@ export class OpenAPIServer {
   private toolExecutor: ToolExecutor;
   private authChecker: AuthChecker;
   private vaultInfo: VaultInfo;
-  private vaultWriter: VaultWriter;
   private bindAddress: string;
 
   constructor(
@@ -581,15 +537,13 @@ export class OpenAPIServer {
     bindAddress: string,
     toolExecutor: ToolExecutor,
     authChecker: AuthChecker,
-    vaultInfo: VaultInfo,
-    vaultWriter: VaultWriter
+    vaultInfo: VaultInfo
   ) {
     this.settings = settings;
     this.bindAddress = bindAddress;
     this.toolExecutor = toolExecutor;
     this.authChecker = authChecker;
     this.vaultInfo = vaultInfo;
-    this.vaultWriter = vaultWriter;
   }
 
   /**
@@ -675,28 +629,6 @@ export class OpenAPIServer {
             error: "unauthorized",
             error_description: authResult.error || "Invalid or missing authentication",
           }));
-          return;
-        }
-
-        // Export to vault
-        if (pathname === "/openapi/export" && req.method === "POST") {
-          const body = await this.readRequestBody(req);
-          let exportPath = ".llm_bridges/openapi.json";
-
-          if (body) {
-            try {
-              const params = JSON.parse(body);
-              if (params.path) {
-                exportPath = params.path;
-              }
-            } catch {
-              // Use default path
-            }
-          }
-
-          await this.vaultWriter(exportPath, JSON.stringify(this.getSpec(), null, 2));
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ success: true, path: exportPath }));
           return;
         }
 
