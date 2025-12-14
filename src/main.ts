@@ -234,11 +234,10 @@ export default class LLMBridgesPlugin extends Plugin {
       }
     }
 
-    // Fall back to shared publicUrl but swap port
+    // Fall back to shared publicUrl as-is (do NOT force port change)
     if (this.settings.publicUrl) {
       try {
         const url = new URL(this.settings.publicUrl);
-        url.port = String(this.settings.openapi.port);
         return url.toString().replace(/\/$/, '');
       } catch {
         // Invalid URL, fall back to localhost
