@@ -507,11 +507,13 @@ export function getSwaggerUIHtml(openApiUrl: string, title: string): string {
 export interface OpenAPISettings {
   enabled: boolean;
   port: number;
+  publicUrl?: string; // optional explicit public URL override for OpenAPI
 }
 
 export const DEFAULT_OPENAPI_SETTINGS: OpenAPISettings = {
   enabled: false,
   port: 3101,
+  publicUrl: "",
 };
 
 // Callback types for tool execution

@@ -224,8 +224,17 @@ export default class LLMBridgesPlugin extends Plugin {
   }
 
   private getOpenAPIPublicUrl(): string {
-    // For OpenAPI server, construct a proper public URL
-    // If publicUrl is set, derive the OpenAPI URL from it (different port)
+    // Prefer explicit OpenAPI public URL if provided
+    if (this.settings.openapi.publicUrl) {
+      try {
+        const url = new URL(this.settings.openapi.publicUrl);
+        return url.toString().replace(/\/$/, '');
+      } catch {
+        // Invalid URL, fall back to shared publicUrl logic
+      }
+    }
+
+    // Fall back to shared publicUrl but swap port
     if (this.settings.publicUrl) {
       try {
         const url = new URL(this.settings.publicUrl);
@@ -235,6 +244,7 @@ export default class LLMBridgesPlugin extends Plugin {
         // Invalid URL, fall back to localhost
       }
     }
+
     // Default to localhost (not bind address which may be 0.0.0.0)
     return `http://127.0.0.1:${this.settings.openapi.port}`;
   }
@@ -450,10 +460,11 @@ export default class LLMBridgesPlugin extends Plugin {
     if (this.openApiServer) {
       this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress, this.getOpenAPIPublicUrl());
       this.openApiServer.restart();
-      if (this.settings.openapi.enabled) {
-        new Notice(`OpenAPI server restarted on port ${this.settings.openapi.port}`);
-      }
+    if (this.settings.openapi.enabled) {
+      new Notice(`OpenAPI server restarted on port ${this.settings.openapi.port}`);
     }
+  }
+
   }
 
   private async handleOAuthRequest(
@@ -1644,10 +1655,23 @@ class LLMBridgesSettingTab extends PluginSettingTab {
             })
         );
 
+      new Setting(containerEl)
+        .setName("OpenAPI Public URL")
+        .setDesc("Full public URL for OpenAPI/Swagger (e.g., https://example.com). Overrides Public URL/port.")
+        .addText((text) =>
+          text
+            .setValue(this.plugin.settings.openapi.publicUrl || "")
+            .setPlaceholder("https://example.com")
+            .onChange(async (value) => {
+              this.plugin.settings.openapi.publicUrl = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+
       // OpenAPI Endpoints Info
       const openApiEndpointsEl = containerEl.createEl("div", { cls: "llm-bridges-openapi-endpoints" });
       openApiEndpointsEl.createEl("h4", { text: "OpenAPI Endpoints" });
-      const openApiUrl = `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.openapi.port}`;
+      const openApiUrl = this.plugin.getOpenAPIPublicUrl();
       const endpointsList = openApiEndpointsEl.createEl("ul");
       endpointsList.createEl("li", {
         text: `Swagger UI: ${openApiUrl}/docs`,
