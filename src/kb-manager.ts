@@ -640,7 +640,15 @@ ${rulesYaml}
       currentPath = currentPath ? `${currentPath}/${part}` : part;
       const folder = this.app.vault.getAbstractFileByPath(currentPath);
       if (!folder) {
-        await this.app.vault.createFolder(currentPath);
+        try {
+          await this.app.vault.createFolder(currentPath);
+        } catch (error) {
+          // Obsidian may throw if the folder was concurrently created or already exists
+          if (error instanceof Error && /Folder already exists/i.test(error.message)) {
+            continue;
+          }
+          throw error;
+        }
       }
     }
   }
