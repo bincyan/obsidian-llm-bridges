@@ -667,9 +667,17 @@ ${rulesYaml}
     const normA = this.normalizePath(a);
     const normB = this.normalizePath(b);
 
-    return normA.startsWith(normB + '/') ||
-           normB.startsWith(normA + '/') ||
-           normA === normB;
+    // Exact match means overlap
+    if (normA === normB) return true;
+
+    // If either is empty after normalization, treat as no overlap
+    if (!normA || !normB) return false;
+
+    // Prevent false positives when one folder name is a prefix of another segment
+    const withSlashA = normA.endsWith('/') ? normA : `${normA}/`;
+    const withSlashB = normB.endsWith('/') ? normB : `${normB}/`;
+
+    return withSlashA.startsWith(withSlashB) || withSlashB.startsWith(withSlashA);
   }
 
   /**
