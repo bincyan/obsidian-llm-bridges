@@ -177,7 +177,8 @@ export default class LLMBridgesPlugin extends Plugin {
       this.getOpenAPIPublicUrl(),
       toolExecutor,
       authChecker,
-      vaultInfo
+      vaultInfo,
+      (req, res, url, baseUrl) => this.handleOAuthRequest(req, res, url, baseUrl)
     );
 
     // Set the MCP tools
@@ -256,6 +257,7 @@ export default class LLMBridgesPlugin extends Plugin {
       }
 
       const url = new URL(req.url || "/", this.getBaseUrl());
+      const baseUrl = this.getBaseUrl();
 
       // =========================================================================
       // Public Endpoints (no auth required)
@@ -273,242 +275,8 @@ export default class LLMBridgesPlugin extends Plugin {
         return;
       }
 
-      // OAuth 2.1 Authorization Server Metadata (RFC 8414)
-      if (url.pathname === "/.well-known/oauth-authorization-server" && req.method === "GET") {
-        const metadata = getAuthorizationServerMetadata(this.getBaseUrl());
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(metadata));
-        return;
-      }
-
-      // Protected Resource Metadata (MCP Spec)
-      if (url.pathname === "/.well-known/oauth-protected-resource" && req.method === "GET") {
-        const metadata = getProtectedResourceMetadata(this.getBaseUrl());
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(metadata));
-        return;
-      }
-
-      // =========================================================================
-      // OAuth 2.1 Endpoints
-      // =========================================================================
-
-      // Authorization endpoint
-      if (url.pathname === "/oauth/authorize" && req.method === "GET") {
-        if (this.settings.authMethod !== "oauth" || !this.oauthManager) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_request", error_description: "OAuth not enabled" }));
-          return;
-        }
-
-        const clientId = url.searchParams.get("client_id");
-        const redirectUri = url.searchParams.get("redirect_uri");
-        const responseType = url.searchParams.get("response_type");
-        const codeChallenge = url.searchParams.get("code_challenge");
-        const codeChallengeMethod = url.searchParams.get("code_challenge_method");
-        const scope = url.searchParams.get("scope") || "mcp:read mcp:write";
-        const state = url.searchParams.get("state");
-
-        // Validate required parameters
-        if (!clientId || !redirectUri || !responseType || !codeChallenge || !codeChallengeMethod) {
-          res.writeHead(400, { "Content-Type": "text/html" });
-          res.end(getErrorPageHtml("Invalid Request", "Missing required OAuth parameters"));
-          return;
-        }
-
-        if (responseType !== "code") {
-          res.writeHead(400, { "Content-Type": "text/html" });
-          res.end(getErrorPageHtml("Unsupported Response Type", "Only 'code' response type is supported"));
-          return;
-        }
-
-        if (codeChallengeMethod !== "S256") {
-          res.writeHead(400, { "Content-Type": "text/html" });
-          res.end(getErrorPageHtml("Unsupported Code Challenge Method", "Only S256 is supported"));
-          return;
-        }
-
-        // Validate client
-        const client = this.oauthManager.getClient(clientId);
-        if (!client) {
-          res.writeHead(400, { "Content-Type": "text/html" });
-          res.end(getErrorPageHtml("Unknown Client", `Client '${clientId}' is not registered`));
-          return;
-        }
-
-        // Validate redirect URI
-        if (!this.oauthManager.validateRedirectUri(clientId, redirectUri)) {
-          res.writeHead(400, { "Content-Type": "text/html" });
-          res.end(getErrorPageHtml("Invalid Redirect URI", "The redirect URI is not allowed for this client"));
-          return;
-        }
-
-        // Generate authorization code
-        const authCode = this.oauthManager.generateAuthorizationCode(
-          clientId,
-          redirectUri,
-          codeChallenge,
-          "S256",
-          scope
-        );
-
-        // Show authorization page
-        res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(getAuthorizationPageHtml(client.client_name, scope, authCode.code, redirectUri, state || undefined));
-        return;
-      }
-
-      // Authorization decision endpoint
-      if (url.pathname === "/oauth/authorize/decision" && req.method === "POST") {
-        if (!this.oauthManager) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_request" }));
-          return;
-        }
-
-        const body = await this.readRequestBody(req);
-        const params = new URLSearchParams(body);
-        const decision = params.get("decision");
-        const code = params.get("code");
-        const redirectUri = params.get("redirect_uri");
-        const state = params.get("state");
-
-        if (!code || !redirectUri) {
-          res.writeHead(400, { "Content-Type": "text/html" });
-          res.end(getErrorPageHtml("Invalid Request", "Missing required parameters"));
-          return;
-        }
-
-        const redirectUrl = new URL(redirectUri);
-
-        if (decision === "approve") {
-          this.oauthManager.approveAuthorizationCode(code);
-          redirectUrl.searchParams.set("code", code);
-          if (state) redirectUrl.searchParams.set("state", state);
-        } else {
-          this.oauthManager.denyAuthorizationCode(code);
-          redirectUrl.searchParams.set("error", "access_denied");
-          redirectUrl.searchParams.set("error_description", "User denied the authorization request");
-          if (state) redirectUrl.searchParams.set("state", state);
-        }
-
-        res.writeHead(302, { Location: redirectUrl.toString() });
-        res.end();
-        return;
-      }
-
-      // Token endpoint
-      if (url.pathname === "/oauth/token" && req.method === "POST") {
-        if (this.settings.authMethod !== "oauth" || !this.oauthManager) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_request", error_description: "OAuth not enabled" }));
-          return;
-        }
-
-        const body = await this.readRequestBody(req);
-        const contentType = req.headers["content-type"] || "";
-
-        let params: URLSearchParams;
-        if (contentType.includes("application/json")) {
-          const json = JSON.parse(body);
-          params = new URLSearchParams(json);
-        } else {
-          params = new URLSearchParams(body);
-        }
-
-        const grantType = params.get("grant_type");
-        const clientId = params.get("client_id");
-
-        if (!grantType || !clientId) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing required parameters" }));
-          return;
-        }
-
-        if (grantType === "authorization_code") {
-          const code = params.get("code");
-          const redirectUri = params.get("redirect_uri");
-          const codeVerifier = params.get("code_verifier");
-
-          if (!code || !redirectUri || !codeVerifier) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing required parameters" }));
-            return;
-          }
-
-          const result = this.oauthManager.exchangeCodeForTokens(code, clientId, redirectUri, codeVerifier);
-
-          if ("error" in result) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(result));
-            return;
-          }
-
-          res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-          res.end(JSON.stringify({
-            access_token: result.access_token.access_token,
-            token_type: result.access_token.token_type,
-            expires_in: result.access_token.expires_in,
-            refresh_token: result.refresh_token?.refresh_token,
-            scope: result.access_token.scope,
-          }));
-          return;
-        }
-
-        if (grantType === "refresh_token") {
-          const refreshToken = params.get("refresh_token");
-
-          if (!refreshToken) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing refresh_token" }));
-            return;
-          }
-
-          const result = this.oauthManager.refreshAccessToken(refreshToken, clientId);
-
-          if ("error" in result) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(result));
-            return;
-          }
-
-          res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-          res.end(JSON.stringify({
-            access_token: result.access_token.access_token,
-            token_type: result.access_token.token_type,
-            expires_in: result.access_token.expires_in,
-            refresh_token: result.refresh_token?.refresh_token,
-            scope: result.access_token.scope,
-          }));
-          return;
-        }
-
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "unsupported_grant_type" }));
-        return;
-      }
-
-      // Token revocation endpoint
-      if (url.pathname === "/oauth/revoke" && req.method === "POST") {
-        if (!this.oauthManager) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_request" }));
-          return;
-        }
-
-        const body = await this.readRequestBody(req);
-        const params = new URLSearchParams(body);
-        const token = params.get("token");
-
-        if (token) {
-          this.oauthManager.revokeToken(token);
-        }
-
-        // Always return 200 OK per RFC 7009
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ revoked: true }));
-        return;
-      }
+      const oauthHandled = await this.handleOAuthRequest(req, res, url, baseUrl);
+      if (oauthHandled) return;
 
       // =========================================================================
       // Protected Endpoints (auth required)
@@ -686,6 +454,248 @@ export default class LLMBridgesPlugin extends Plugin {
         new Notice(`OpenAPI server restarted on port ${this.settings.openapi.port}`);
       }
     }
+  }
+
+  private async handleOAuthRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+    baseUrl: string
+  ): Promise<boolean> {
+    // OAuth 2.1 Authorization Server Metadata (RFC 8414)
+    if (url.pathname === "/.well-known/oauth-authorization-server" && req.method === "GET") {
+      const metadata = getAuthorizationServerMetadata(baseUrl);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(metadata));
+      return true;
+    }
+
+    // Protected Resource Metadata (MCP Spec)
+    if (url.pathname === "/.well-known/oauth-protected-resource" && req.method === "GET") {
+      const metadata = getProtectedResourceMetadata(baseUrl);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(metadata));
+      return true;
+    }
+
+    // Authorization endpoint
+    if (url.pathname === "/oauth/authorize" && req.method === "GET") {
+      if (this.settings.authMethod !== "oauth" || !this.oauthManager) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_request", error_description: "OAuth not enabled" }));
+        return true;
+      }
+
+      const clientId = url.searchParams.get("client_id");
+      const redirectUri = url.searchParams.get("redirect_uri");
+      const responseType = url.searchParams.get("response_type");
+      const codeChallenge = url.searchParams.get("code_challenge");
+      const codeChallengeMethod = url.searchParams.get("code_challenge_method");
+      const scope = url.searchParams.get("scope") || "mcp:read mcp:write";
+      const state = url.searchParams.get("state");
+
+      // Validate required parameters
+      if (!clientId || !redirectUri || !responseType || !codeChallenge || !codeChallengeMethod) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(getErrorPageHtml("Invalid Request", "Missing required OAuth parameters"));
+        return true;
+      }
+
+      if (responseType !== "code") {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(getErrorPageHtml("Unsupported Response Type", "Only 'code' response type is supported"));
+        return true;
+      }
+
+      if (codeChallengeMethod !== "S256") {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(getErrorPageHtml("Unsupported Code Challenge Method", "Only S256 is supported"));
+        return true;
+      }
+
+      // Validate client
+      const client = this.oauthManager.getClient(clientId);
+      if (!client) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(getErrorPageHtml("Unknown Client", `Client '${clientId}' is not registered`));
+        return true;
+      }
+
+      // Validate redirect URI
+      if (!this.oauthManager.validateRedirectUri(clientId, redirectUri)) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(getErrorPageHtml("Invalid Redirect URI", "The redirect URI is not allowed for this client"));
+        return true;
+      }
+
+      // Generate authorization code
+      const authCode = this.oauthManager.generateAuthorizationCode(
+        clientId,
+        redirectUri,
+        codeChallenge,
+        "S256",
+        scope
+      );
+
+      // Show authorization page
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(getAuthorizationPageHtml(client.client_name, scope, authCode.code, redirectUri, state || undefined));
+      return true;
+    }
+
+    // Authorization decision endpoint
+    if (url.pathname === "/oauth/authorize/decision" && req.method === "POST") {
+      if (!this.oauthManager) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_request" }));
+        return true;
+      }
+
+      const body = await this.readRequestBody(req);
+      const params = new URLSearchParams(body);
+      const decision = params.get("decision");
+      const code = params.get("code");
+      const redirectUri = params.get("redirect_uri");
+      const state = params.get("state");
+
+      if (!code || !redirectUri) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(getErrorPageHtml("Invalid Request", "Missing required parameters"));
+        return true;
+      }
+
+      const redirectUrl = new URL(redirectUri);
+
+      if (decision === "approve") {
+        this.oauthManager.approveAuthorizationCode(code);
+        redirectUrl.searchParams.set("code", code);
+        if (state) redirectUrl.searchParams.set("state", state);
+      } else {
+        this.oauthManager.denyAuthorizationCode(code);
+        redirectUrl.searchParams.set("error", "access_denied");
+        redirectUrl.searchParams.set("error_description", "User denied the authorization request");
+        if (state) redirectUrl.searchParams.set("state", state);
+      }
+
+      res.writeHead(302, { Location: redirectUrl.toString() });
+      res.end();
+      return true;
+    }
+
+    // Token endpoint
+    if (url.pathname === "/oauth/token" && req.method === "POST") {
+      if (this.settings.authMethod !== "oauth" || !this.oauthManager) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_request", error_description: "OAuth not enabled" }));
+        return true;
+      }
+
+      const body = await this.readRequestBody(req);
+      const contentType = req.headers["content-type"] || "";
+
+      let params: URLSearchParams;
+      if (contentType.includes("application/json")) {
+        const json = JSON.parse(body);
+        params = new URLSearchParams(json);
+      } else {
+        params = new URLSearchParams(body);
+      }
+
+      const grantType = params.get("grant_type");
+      const clientId = params.get("client_id");
+
+      if (!grantType || !clientId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing required parameters" }));
+        return true;
+      }
+
+      if (grantType === "authorization_code") {
+        const code = params.get("code");
+        const redirectUri = params.get("redirect_uri");
+        const codeVerifier = params.get("code_verifier");
+
+        if (!code || !redirectUri || !codeVerifier) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing required parameters" }));
+          return true;
+        }
+
+        const result = this.oauthManager.exchangeCodeForTokens(code, clientId, redirectUri, codeVerifier);
+
+        if ("error" in result) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+          return true;
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({
+          access_token: result.access_token.access_token,
+          token_type: result.access_token.token_type,
+          expires_in: result.access_token.expires_in,
+          refresh_token: result.refresh_token?.refresh_token,
+          scope: result.access_token.scope,
+        }));
+        return true;
+      }
+
+      if (grantType === "refresh_token") {
+        const refreshToken = params.get("refresh_token");
+
+        if (!refreshToken) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_request", error_description: "Missing refresh_token" }));
+          return true;
+        }
+
+        const result = this.oauthManager.refreshAccessToken(refreshToken, clientId);
+
+        if ("error" in result) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+          return true;
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({
+          access_token: result.access_token.access_token,
+          token_type: result.access_token.token_type,
+          expires_in: result.access_token.expires_in,
+          refresh_token: result.refresh_token?.refresh_token,
+          scope: result.access_token.scope,
+        }));
+        return true;
+      }
+
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "unsupported_grant_type" }));
+      return true;
+    }
+
+    // Token revocation endpoint
+    if (url.pathname === "/oauth/revoke" && req.method === "POST") {
+      if (!this.oauthManager) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_request" }));
+        return true;
+      }
+
+      const body = await this.readRequestBody(req);
+      const params = new URLSearchParams(body);
+      const token = params.get("token");
+
+      if (token) {
+        this.oauthManager.revokeToken(token);
+      }
+
+      // Always return 200 OK per RFC 7009
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ revoked: true }));
+      return true;
+    }
+
+    return false;
   }
 
   generateSessionId(): string {

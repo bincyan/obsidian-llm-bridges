@@ -167,6 +167,8 @@ OAuth provides better security with automatic token refresh and granular permiss
 | `/docs` | Swagger UI for interactive API testing |
 | `/api/*` | REST API endpoints (auth required) |
 
+> **ChatGPT/OAuth on the same port**: When the OpenAPI server is enabled, OAuth endpoints (`/oauth/*`, `/.well-known/*`) are also served on the OpenAPI port. Set **Public URL** to your HTTPS host/port (e.g., `https://your-domain.com:3001`) so ChatGPT can reach both OpenAPI and OAuth on one origin.
+
 > **Note**: ChatGPT requires HTTPS. You must configure a reverse proxy with SSL certificates (see step 5).
 
 ### 5. (Optional) Configure Reverse Proxy for HTTPS

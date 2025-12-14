@@ -518,6 +518,12 @@ export const DEFAULT_OPENAPI_SETTINGS: OpenAPISettings = {
 export type ToolExecutor = (name: string, args: Record<string, unknown>) => Promise<unknown>;
 export type AuthChecker = (authHeader: string | undefined) => { authenticated: boolean; error?: string };
 export type VaultInfo = () => { name: string; version: string };
+export type OAuthRequestHandler = (
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL,
+  baseUrl: string
+) => Promise<boolean>;
 
 /**
  * OpenAPI Server class - runs independently from MCP SSE server
@@ -532,6 +538,7 @@ export class OpenAPIServer {
   private vaultInfo: VaultInfo;
   private bindAddress: string;
   private publicUrl: string;
+  private oauthHandler?: OAuthRequestHandler;
 
   constructor(
     settings: OpenAPISettings,
@@ -539,7 +546,8 @@ export class OpenAPIServer {
     publicUrl: string,
     toolExecutor: ToolExecutor,
     authChecker: AuthChecker,
-    vaultInfo: VaultInfo
+    vaultInfo: VaultInfo,
+    oauthHandler?: OAuthRequestHandler
   ) {
     this.settings = settings;
     this.bindAddress = bindAddress;
@@ -547,6 +555,7 @@ export class OpenAPIServer {
     this.toolExecutor = toolExecutor;
     this.authChecker = authChecker;
     this.vaultInfo = vaultInfo;
+    this.oauthHandler = oauthHandler;
   }
 
   /**
@@ -599,6 +608,7 @@ export class OpenAPIServer {
 
       const url = new URL(req.url || "/", `http://${this.bindAddress}:${this.settings.port}`);
       const pathname = url.pathname;
+      const serverUrl = this.getServerUrlFromRequest(req);
 
       try {
         // Public endpoints (no auth)
@@ -626,6 +636,11 @@ export class OpenAPIServer {
             openapi: true,
           }));
           return;
+        }
+
+        if (this.oauthHandler) {
+          const handled = await this.oauthHandler(req, res, url, serverUrl);
+          if (handled) return;
         }
 
         // Protected endpoints - check auth
