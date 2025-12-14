@@ -1,6 +1,6 @@
 {
   "name": "obsidian-llm-bridges",
-  "version": "0.0.1",
+  "version": "0.0.10",
   "description": "Bridge your Obsidian vault with LLMs like ChatGPT and Claude",
   "type": "module",
   "main": "main.js",

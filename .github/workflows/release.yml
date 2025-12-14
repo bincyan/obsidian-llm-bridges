@@ -39,12 +39,20 @@ jobs:
         run: |
           TAG_VERSION="${{ steps.version.outputs.tag }}"
           MANIFEST_VERSION=$(jq -r '.version' manifest.json)
+          MIN_APP_VERSION=$(jq -r --arg v "$TAG_VERSION" '.[$v] // ""' versions.json)
 
           echo "Tag version: $TAG_VERSION"
           echo "Manifest version: $MANIFEST_VERSION"
+          echo "versions.json entry: ${MIN_APP_VERSION:-<missing>}"
 
           if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
-            echo "⚠️ Warning: Tag ($TAG_VERSION) does not match manifest ($MANIFEST_VERSION)"
+            echo "❌ Tag ($TAG_VERSION) does not match manifest ($MANIFEST_VERSION)"
+            exit 1
+          fi
+
+          if [ -z "$MIN_APP_VERSION" ]; then
+            echo "❌ versions.json is missing an entry for $TAG_VERSION"
+            exit 1
           fi
 
       - name: Verify build outputs
