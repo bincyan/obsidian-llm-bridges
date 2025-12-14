@@ -525,7 +525,7 @@ export type VaultInfo = () => { name: string; version: string };
 export class OpenAPIServer {
   private server: http.Server | null = null;
   private tools: MCPTool[] = [];
-  private openApiSpec: OpenAPISpec | null = null;
+  private specCache: { serverUrl: string; spec: OpenAPISpec } | null = null;
   private settings: OpenAPISettings;
   private toolExecutor: ToolExecutor;
   private authChecker: AuthChecker;
@@ -554,20 +554,22 @@ export class OpenAPIServer {
    */
   setTools(tools: MCPTool[]): void {
     this.tools = tools;
-    this.openApiSpec = null; // Will be regenerated on next request
+    this.specCache = null; // Will be regenerated on next request
   }
 
   /**
    * Get the OpenAPI specification
    */
-  getSpec(): OpenAPISpec {
-    if (!this.openApiSpec) {
+  getSpec(serverUrl?: string): OpenAPISpec {
+    const effectiveServerUrl = (serverUrl || this.getDefaultServerUrl()).replace(/\/$/, "");
+    if (!this.specCache || this.specCache.serverUrl !== effectiveServerUrl) {
       const info = this.vaultInfo();
-      // Use publicUrl if set, otherwise use localhost (not bind address which may be 0.0.0.0)
-      const serverUrl = this.publicUrl || `http://127.0.0.1:${this.settings.port}`;
-      this.openApiSpec = generateOpenAPISpec(this.tools, serverUrl, info.version);
+      this.specCache = {
+        serverUrl: effectiveServerUrl,
+        spec: generateOpenAPISpec(this.tools, effectiveServerUrl, info.version),
+      };
     }
-    return this.openApiSpec;
+    return this.specCache.spec;
   }
 
   /**
@@ -601,8 +603,9 @@ export class OpenAPIServer {
       try {
         // Public endpoints (no auth)
         if (pathname === "/openapi.json" && req.method === "GET") {
+          const serverUrl = this.getServerUrlFromRequest(req);
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(this.getSpec(), null, 2));
+          res.end(JSON.stringify(this.getSpec(serverUrl), null, 2));
           return;
         }
 
@@ -729,7 +732,7 @@ export class OpenAPIServer {
     this.settings = settings;
     this.bindAddress = bindAddress;
     this.publicUrl = publicUrl;
-    this.openApiSpec = null; // Regenerate spec with new server URL
+    this.specCache = null; // Regenerate spec with new server URL
   }
 
   /**
@@ -746,5 +749,40 @@ export class OpenAPIServer {
       req.on("end", () => resolve(body));
       req.on("error", reject);
     });
+  }
+
+  /**
+   * Determine the server URL to advertise in the OpenAPI document.
+   * Uses explicit publicUrl if provided; otherwise falls back to the
+   * forwarded host/proto so Swagger UI uses the correct origin and avoids
+   * mixed-content/CORS failures when accessed via HTTPS reverse proxies.
+   */
+  private getServerUrlFromRequest(req: http.IncomingMessage): string {
+    if (this.publicUrl) {
+      return this.publicUrl.replace(/\/$/, "");
+    }
+
+    const forwardedProto = (req.headers["x-forwarded-proto"] as string) || null;
+    const forwardedHost = (req.headers["x-forwarded-host"] as string) || null;
+    const host = forwardedHost || req.headers.host;
+
+    if (host) {
+      const proto = forwardedProto || "http";
+      return `${proto}://${host}`.replace(/\/$/, "");
+    }
+
+    return this.getDefaultServerUrl();
+  }
+
+  /**
+   * Fallback server URL when no request headers or publicUrl are available.
+   * Uses localhost instead of bindAddress (which may be 0.0.0.0) to keep a
+   * stable, reachable default during local development.
+   */
+  private getDefaultServerUrl(): string {
+    if (this.publicUrl) {
+      return this.publicUrl.replace(/\/$/, "");
+    }
+    return `http://127.0.0.1:${this.settings.port}`;
   }
 }
