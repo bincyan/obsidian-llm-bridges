@@ -223,7 +223,7 @@ export default class LLMBridgesPlugin extends Plugin {
     return `http://${this.settings.bindAddress}:${this.settings.port}`;
   }
 
-  private getOpenAPIPublicUrl(): string {
+  getOpenAPIPublicUrl(): string {
     // Prefer explicit OpenAPI public URL if provided
     if (this.settings.openapi.publicUrl) {
       try {
