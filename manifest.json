@@ -1,7 +1,7 @@
 {
   "id": "obsidian-llm-bridges",
   "name": "LLM Bridges",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "minAppVersion": "0.15.0",
   "description": "Bridge your Obsidian vault with Large Language Models",
   "author": "bincyan",

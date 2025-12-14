@@ -26,6 +26,28 @@ jobs:
         id: version
         run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
+      - name: Sync manifest/package/versions to tag
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const clean = (process.env.CLEAN_VERSION || '').replace(/^v/, '');
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = clean;
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+
+          const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+          manifest.version = clean;
+          fs.writeFileSync('manifest.json', JSON.stringify(manifest, null, 2) + '\n');
+
+          const versions = JSON.parse(fs.readFileSync('versions.json', 'utf8'));
+          const minApp = manifest.minAppVersion || versions[clean] || '0.15.0';
+          versions[clean] = minApp;
+          fs.writeFileSync('versions.json', JSON.stringify(versions, null, 2) + '\n');
+          NODE
+        env:
+          CLEAN_VERSION: "${{ steps.version.outputs.tag }}"
+
       - name: Install dependencies
         run: npm ci
 
