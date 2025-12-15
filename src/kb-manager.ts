@@ -66,6 +66,8 @@ export class KBManager {
    */
   async listKnowledgeBases(): Promise<KnowledgeBaseSummary[]> {
     const basePath = this.getKBBasePath();
+    // Ensure base folder exists so we don't return empty just because the root hasn't been created yet
+    await this.ensureFolder(basePath);
     const baseFolder = this.app.vault.getAbstractFileByPath(basePath);
 
     if (!(baseFolder instanceof TFolder)) {
@@ -88,8 +90,8 @@ export class KBManager {
                 (kb.organization_rules.length > 200 ? '...' : ''),
             });
           }
-        } catch {
-          // Skip invalid KBs
+        } catch (error) {
+          console.warn(`[LLM Bridges] Skipping invalid knowledge base folder '${child.name}':`, error);
         }
       }
     }
