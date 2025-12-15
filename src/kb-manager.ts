@@ -647,7 +647,7 @@ ${rulesYaml}
           await this.app.vault.createFolder(currentPath);
         } catch (error) {
           // Obsidian may throw if the folder was concurrently created or already exists
-          if (error instanceof Error && /Folder already exists/i.test(error.message)) {
+          if (error instanceof Error && /already exists/i.test(error.message)) {
             continue;
           }
           throw error;

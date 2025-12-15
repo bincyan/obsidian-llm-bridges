@@ -1824,46 +1824,14 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       text: "Add this to your Claude Desktop configuration:",
     });
 
-    const configEl = containerEl.createEl("pre", {
-      cls: "llm-bridges-config",
-    });
-
+    const configEl = containerEl.createEl("pre", { cls: "llm-bridges-config" });
     const serverUrl = this.plugin.settings.publicUrl || `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`;
+
     if (this.plugin.settings.authMethod === "oauth") {
       configEl.setText(`{
   "mcpServers": {
     "obsidian": {
       "url": "${serverUrl}/sse"
-    }
-
-    // ===========================================================================
-    // Developer Settings (bottom)
-    // ===========================================================================
-    containerEl.createEl("h3", { text: "Developer" });
-
-    new Setting(containerEl)
-      .setName("Developer Mode")
-      .setDesc("Enable verbose logging to .llm_bridges/logs/debug.log and developer utilities")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.developerMode)
-          .onChange(async (value) => {
-            this.plugin.settings.developerMode = value;
-            await this.plugin.saveSettings();
-            new Notice(value ? "Developer mode enabled" : "Developer mode disabled");
-            this.display();
-          })
-      );
-
-    if (this.plugin.settings.developerMode) {
-      new Setting(containerEl)
-        .setName("Run Integration Test")
-        .setDesc("Creates a test KB, lists KBs, validates filename/frontmatter/content rules; logs to .llm_bridges/logs/debug.log.")
-        .addButton((btn) =>
-          btn.setButtonText("Run").onClick(() => {
-            this.plugin.runIntegrationTest();
-          })
-        );
     }
   }
 }
@@ -1899,6 +1867,36 @@ the authorization endpoints and prompt you to authorize.`);
     locationsEl.createEl("li", {
       text: "Windows: %APPDATA%\\Claude\\claude_desktop_config.json",
     });
+
+    // ===========================================================================
+    // Developer Settings (bottom)
+    // ===========================================================================
+    containerEl.createEl("h3", { text: "Developer" });
+
+    new Setting(containerEl)
+      .setName("Developer Mode")
+      .setDesc("Enable verbose logging to .llm_bridges/logs/debug.log and developer utilities")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.developerMode)
+          .onChange(async (value) => {
+            this.plugin.settings.developerMode = value;
+            await this.plugin.saveSettings();
+            new Notice(value ? "Developer mode enabled" : "Developer mode disabled");
+            this.display();
+          })
+      );
+
+    if (this.plugin.settings.developerMode) {
+      new Setting(containerEl)
+        .setName("Run Integration Test")
+        .setDesc("Creates a test KB, lists KBs, validates filename/frontmatter/content rules; logs to .llm_bridges/logs/debug.log.")
+        .addButton((btn) =>
+          btn.setButtonText("Run").onClick(() => {
+            this.plugin.runIntegrationTest();
+          })
+        );
+    }
 
     // Version info
     const versionEl = containerEl.createEl("div", { cls: "llm-bridges-version" });
