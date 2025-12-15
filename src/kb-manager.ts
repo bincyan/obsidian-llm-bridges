@@ -86,7 +86,12 @@ export class KBManager {
     // Rebuild cache by scanning folders
     const kbs = await this.scanKnowledgeBases();
     await this.logDev(`KB cache rebuild: found ${kbs.length} entries`);
-    await this.saveMetadataCache(kbs);
+    try {
+      await this.saveMetadataCache(kbs);
+    } catch (error) {
+      await this.logDev(`KB cache save failed: ${error instanceof Error ? error.message : String(error)}`);
+      // Ignore cache write errors to avoid breaking the API
+    }
     return kbs;
   }
 
@@ -808,6 +813,17 @@ ${rulesYaml}
     const trimmed = rules || '';
     if (trimmed.length <= 200) return trimmed;
     return `${trimmed.slice(0, 200)}...`;
+  }
+
+  /**
+   * Developer logging (delegated to plugin, if available)
+   */
+  private async logDev(message: string): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const plugin = (this as any).plugin as { devLog?: (msg: string) => Promise<void> };
+    if (plugin && typeof plugin.devLog === 'function') {
+      await plugin.devLog(message);
+    }
   }
 
   /**
