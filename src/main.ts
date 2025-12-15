@@ -1702,30 +1702,6 @@ class LLMBridgesSettingTab extends PluginSettingTab {
     // ===========================================================================
     containerEl.createEl("h3", { text: "Developer" });
 
-    new Setting(containerEl)
-      .setName("Developer Mode")
-      .setDesc("Enable verbose logging to .llm_bridges/logs/debug.log and developer utilities")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.developerMode)
-          .onChange(async (value) => {
-            this.plugin.settings.developerMode = value;
-            await this.plugin.saveSettings();
-            new Notice(value ? "Developer mode enabled" : "Developer mode disabled");
-          })
-      );
-
-    if (this.plugin.settings.developerMode) {
-      new Setting(containerEl)
-        .setName("Run Integration Test")
-        .setDesc("Creates a test KB, lists KBs, and validates a rule-blocked note. Logs to .llm_bridges/logs/debug.log.")
-        .addButton((btn) =>
-          btn.setButtonText("Run").onClick(() => {
-            this.plugin.runIntegrationTest();
-          })
-        );
-    }
-
     // ===========================================================================
     // OpenAPI Settings
     // ===========================================================================
@@ -1858,6 +1834,36 @@ class LLMBridgesSettingTab extends PluginSettingTab {
   "mcpServers": {
     "obsidian": {
       "url": "${serverUrl}/sse"
+    }
+
+    // ===========================================================================
+    // Developer Settings (bottom)
+    // ===========================================================================
+    containerEl.createEl("h3", { text: "Developer" });
+
+    new Setting(containerEl)
+      .setName("Developer Mode")
+      .setDesc("Enable verbose logging to .llm_bridges/logs/debug.log and developer utilities")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.developerMode)
+          .onChange(async (value) => {
+            this.plugin.settings.developerMode = value;
+            await this.plugin.saveSettings();
+            new Notice(value ? "Developer mode enabled" : "Developer mode disabled");
+            this.display();
+          })
+      );
+
+    if (this.plugin.settings.developerMode) {
+      new Setting(containerEl)
+        .setName("Run Integration Test")
+        .setDesc("Creates a test KB, lists KBs, validates filename/frontmatter/content rules; logs to .llm_bridges/logs/debug.log.")
+        .addButton((btn) =>
+          btn.setButtonText("Run").onClick(() => {
+            this.plugin.runIntegrationTest();
+          })
+        );
     }
   }
 }
