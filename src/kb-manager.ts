@@ -78,10 +78,14 @@ export class KBManager {
 
     // Try metadata cache first
     const cached = await this.loadMetadataCache();
-    if (cached && cached.length > 0) return cached;
+    if (cached && cached.length > 0) {
+      await this.logDev(`KB cache hit (${cached.length} entries)`);
+      return cached;
+    }
 
     // Rebuild cache by scanning folders
     const kbs = await this.scanKnowledgeBases();
+    await this.logDev(`KB cache rebuild: found ${kbs.length} entries`);
     await this.saveMetadataCache(kbs);
     return kbs;
   }
@@ -694,10 +698,12 @@ ${rulesYaml}
         const kbs = parsed.knowledge_bases as KnowledgeBaseSummary[];
         // If cache is empty, force rebuild
         if (!kbs.length) return null;
+        await this.logDev(`Loaded KB cache from metadata.json (${kbs.length} entries)`);
         return kbs;
       }
     } catch (error) {
       console.warn('[LLM Bridges] Failed to read KB metadata cache:', error);
+      await this.logDev(`Failed to read KB cache: ${error}`);
     }
 
     return null;
@@ -729,12 +735,14 @@ ${rulesYaml}
           const existing = this.app.vault.getAbstractFileByPath(metadataPath);
           if (existing instanceof TFile) {
             await this.app.vault.modify(existing, content);
+            await this.logDev("KB cache file existed; modified existing metadata.json");
             return;
           }
         }
         throw error;
       }
     }
+    await this.logDev(`KB cache saved (${kbs.length} entries) to metadata.json`);
   }
 
   /**
@@ -762,9 +770,11 @@ ${rulesYaml}
               create_time: kb.create_time,
               organization_rules_preview: this.getOrganizationRulesPreview(kb.organization_rules),
             });
+            await this.logDev(`KB scanned: ${kb.name} subfolder=${kb.subfolder}`);
           }
         } catch (error) {
           console.warn(`[LLM Bridges] Skipping invalid knowledge base folder '${child.name}':`, error);
+          await this.logDev(`KB scan skip '${child.name}': ${error instanceof Error ? error.message : String(error)}`);
         }
       }
     }
@@ -798,6 +808,17 @@ ${rulesYaml}
     const trimmed = rules || '';
     if (trimmed.length <= 200) return trimmed;
     return `${trimmed.slice(0, 200)}...`;
+  }
+
+  /**
+   * Developer logging (delegated to plugin, if available)
+   */
+  private async logDev(message: string): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyThis = this as any;
+    if (anyThis.plugin && typeof anyThis.plugin.devLog === 'function') {
+      await anyThis.plugin.devLog(message);
+    }
   }
 
   /**
