@@ -43,7 +43,6 @@ import {
   OpenAPISettings,
   DEFAULT_OPENAPI_SETTINGS,
 } from "./openapi";
-import { validateNote } from "./validation";
 
 // MCP Protocol types
 interface MCPRequest {
