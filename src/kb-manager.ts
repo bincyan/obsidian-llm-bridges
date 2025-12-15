@@ -718,7 +718,19 @@ ${rulesYaml}
     if (file instanceof TFile) {
       await this.app.vault.modify(file, content);
     } else {
-      await this.app.vault.create(metadataPath, content);
+      try {
+        await this.app.vault.create(metadataPath, content);
+      } catch (error) {
+        // If file was created concurrently, fall back to modify
+        if (error instanceof Error && /already exists/i.test(error.message)) {
+          const existing = this.app.vault.getAbstractFileByPath(metadataPath);
+          if (existing instanceof TFile) {
+            await this.app.vault.modify(existing, content);
+            return;
+          }
+        }
+        throw error;
+      }
     }
   }
 
