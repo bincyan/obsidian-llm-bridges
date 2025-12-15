@@ -820,17 +820,6 @@ ${rulesYaml}
    */
   private async logDev(message: string): Promise<void> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const plugin = (this as any).plugin as { devLog?: (msg: string) => Promise<void> };
-    if (plugin && typeof plugin.devLog === 'function') {
-      await plugin.devLog(message);
-    }
-  }
-
-  /**
-   * Developer logging (delegated to plugin, if available)
-   */
-  private async logDev(message: string): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyThis = this as any;
     if (anyThis.plugin && typeof anyThis.plugin.devLog === 'function') {
       await anyThis.plugin.devLog(message);
