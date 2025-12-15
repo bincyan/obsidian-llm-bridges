@@ -78,7 +78,7 @@ export class KBManager {
 
     // Try metadata cache first
     const cached = await this.loadMetadataCache();
-    if (cached) return cached;
+    if (cached && cached.length > 0) return cached;
 
     // Rebuild cache by scanning folders
     const kbs = await this.scanKnowledgeBases();
@@ -691,7 +691,10 @@ ${rulesYaml}
       const content = await this.app.vault.read(file);
       const parsed = JSON.parse(content);
       if (Array.isArray(parsed.knowledge_bases)) {
-        return parsed.knowledge_bases as KnowledgeBaseSummary[];
+        const kbs = parsed.knowledge_bases as KnowledgeBaseSummary[];
+        // If cache is empty, force rebuild
+        if (!kbs.length) return null;
+        return kbs;
       }
     } catch (error) {
       console.warn('[LLM Bridges] Failed to read KB metadata cache:', error);
