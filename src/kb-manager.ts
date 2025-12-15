@@ -102,11 +102,19 @@ export class KBManager {
     const metaPath = this.getMetaPath(name);
     const file = this.app.vault.getAbstractFileByPath(metaPath);
 
-    if (!(file instanceof TFile)) {
+    let content: string | null = null;
+
+    if (file instanceof TFile) {
+      content = await this.app.vault.read(file);
+    } else {
+      // Fallback for environments where .llm_bridges may not be indexed by the vault
+      content = await this.readFileWithAdapter(metaPath);
+    }
+
+    if (!content) {
       return null;
     }
 
-    const content = await this.app.vault.read(file);
     return this.parseKBMeta(name, content);
   }
 
@@ -219,6 +227,16 @@ export class KBManager {
     if (updates.subfolder) {
       await this.ensureFolder(updatedKB.subfolder);
     }
+
+    // Refresh metadata cache to keep listings up-to-date
+    const summary: KnowledgeBaseSummary = {
+      name: updatedKB.name,
+      description: updatedKB.description,
+      subfolder: updatedKB.subfolder,
+      create_time: updatedKB.create_time,
+      organization_rules_preview: this.getOrganizationRulesPreview(updatedKB.organization_rules),
+    };
+    await this.updateMetadataCache(summary);
 
     return updatedKB;
   }
@@ -694,10 +712,18 @@ ${rulesYaml}
   private async loadMetadataCache(): Promise<KnowledgeBaseSummary[] | null> {
     const metadataPath = this.getMetadataPath();
     const file = this.app.vault.getAbstractFileByPath(metadataPath);
-    if (!(file instanceof TFile)) return null;
+    let content: string | null = null;
+
+    if (file instanceof TFile) {
+      content = await this.app.vault.read(file);
+    } else {
+      // Hidden folders may not be indexed by the vault; fall back to direct adapter reads
+      content = await this.readFileWithAdapter(metadataPath);
+    }
+
+    if (!content) return null;
 
     try {
-      const content = await this.app.vault.read(file);
       const parsed = JSON.parse(content);
       if (Array.isArray(parsed.knowledge_bases)) {
         const kbs = parsed.knowledge_bases as KnowledgeBaseSummary[];
@@ -757,30 +783,40 @@ ${rulesYaml}
     const basePath = this.getKBBasePath();
     const baseFolder = this.app.vault.getAbstractFileByPath(basePath);
 
-    if (!(baseFolder instanceof TFolder)) {
-      return [];
+    const folderNames: string[] = [];
+    if (baseFolder instanceof TFolder) {
+      for (const child of baseFolder.children) {
+        if (child instanceof TFolder) {
+          folderNames.push(child.name);
+        }
+      }
+    } else {
+      // Fallback for environments where .llm_bridges isn't indexed by Obsidian
+      const adapterFolders = await this.listKBFolderNamesWithAdapter(basePath);
+      if (!adapterFolders.length) {
+        return [];
+      }
+      folderNames.push(...adapterFolders);
     }
 
     const kbs: KnowledgeBaseSummary[] = [];
 
-    for (const child of baseFolder.children) {
-      if (child instanceof TFolder) {
-        try {
-          const kb = await this.getKnowledgeBase(child.name);
-          if (kb) {
-            kbs.push({
-              name: kb.name,
-              description: kb.description,
-              subfolder: kb.subfolder,
-              create_time: kb.create_time,
-              organization_rules_preview: this.getOrganizationRulesPreview(kb.organization_rules),
-            });
-            await this.logDev(`KB scanned: ${kb.name} subfolder=${kb.subfolder}`);
-          }
-        } catch (error) {
-          console.warn(`[LLM Bridges] Skipping invalid knowledge base folder '${child.name}':`, error);
-          await this.logDev(`KB scan skip '${child.name}': ${error instanceof Error ? error.message : String(error)}`);
+    for (const folderName of folderNames) {
+      try {
+        const kb = await this.getKnowledgeBase(folderName);
+        if (kb) {
+          kbs.push({
+            name: kb.name,
+            description: kb.description,
+            subfolder: kb.subfolder,
+            create_time: kb.create_time,
+            organization_rules_preview: this.getOrganizationRulesPreview(kb.organization_rules),
+          });
+          await this.logDev(`KB scanned: ${kb.name} subfolder=${kb.subfolder}`);
         }
+      } catch (error) {
+        console.warn(`[LLM Bridges] Skipping invalid knowledge base folder '${folderName}':`, error);
+        await this.logDev(`KB scan skip '${folderName}': ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -813,6 +849,52 @@ ${rulesYaml}
     const trimmed = rules || '';
     if (trimmed.length <= 200) return trimmed;
     return `${trimmed.slice(0, 200)}...`;
+  }
+
+  /**
+   * Read a file directly via the vault adapter (useful when hidden folders aren't indexed)
+   */
+  private async readFileWithAdapter(path: string): Promise<string | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapter = (this.app.vault as any).adapter;
+    if (!adapter || typeof adapter.exists !== 'function' || typeof adapter.read !== 'function') {
+      return null;
+    }
+
+    try {
+      if (await adapter.exists(path)) {
+        return await adapter.read(path);
+      }
+    } catch (error) {
+      await this.logDev(`Adapter read failed for ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return null;
+  }
+
+  /**
+   * List KB folder names using the adapter (fallback when vault indexing doesn't include .llm_bridges)
+   */
+  private async listKBFolderNamesWithAdapter(basePath: string): Promise<string[]> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapter = (this.app.vault as any).adapter;
+    if (!adapter || typeof adapter.list !== 'function') {
+      return [];
+    }
+
+    try {
+      const listing = await adapter.list(basePath);
+      const folders: string[] = Array.isArray(listing?.folders) ? listing.folders : [];
+
+      return folders
+        .map((path: string) => path.replace(/\\/g, '/').replace(/\/+$/, ''))
+        .map((path) => path.split('/').pop() || '')
+        .filter(Boolean);
+    } catch (error) {
+      await this.logDev(
+        `Adapter folder list failed for ${basePath}: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return [];
+    }
   }
 
   /**
