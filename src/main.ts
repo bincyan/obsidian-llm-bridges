@@ -440,6 +440,26 @@ export default class LLMBridgesPlugin extends Plugin {
   /**
    * Ensure folder exists (recursive). No-op if it already exists.
    */
+  private async ensureFolder(path: string): Promise<void> {
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFolder) return;
+    if (existing instanceof TFile) return;
+
+    const parts = path.split("/");
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      const file = this.app.vault.getAbstractFileByPath(current);
+      if (!file) {
+        try {
+          await this.app.vault.createFolder(current);
+        } catch {
+          // ignore concurrent creation
+        }
+      }
+    }
+  }
+
   /**
    * Developer logging helper: append to .llm_bridges/logs/debug.log when enabled
    */
