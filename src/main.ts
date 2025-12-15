@@ -43,6 +43,7 @@ import {
   OpenAPISettings,
   DEFAULT_OPENAPI_SETTINGS,
 } from "./openapi";
+import { validateNote } from "./validation";
 
 // MCP Protocol types
 interface MCPRequest {
@@ -69,6 +70,7 @@ interface LLMBridgesSettings {
   authMethod: AuthMethod; // Authentication method: API Key or OAuth 2.1
   oauth: OAuthSettings;   // OAuth 2.1 settings
   openapi: OpenAPISettings; // OpenAPI server settings
+  developerMode: boolean; // Enable developer logging and utilities
 }
 
 const DEFAULT_SETTINGS: LLMBridgesSettings = {
@@ -79,6 +81,7 @@ const DEFAULT_SETTINGS: LLMBridgesSettings = {
   authMethod: "apiKey",
   oauth: DEFAULT_OAUTH_SETTINGS,
   openapi: DEFAULT_OPENAPI_SETTINGS,
+  developerMode: false,
 };
 
 export default class LLMBridgesPlugin extends Plugin {
@@ -433,6 +436,112 @@ export default class LLMBridgesPlugin extends Plugin {
       req.on("end", () => resolve(body));
       req.on("error", reject);
     });
+  }
+
+  /**
+   * Ensure folder exists (recursive). No-op if it already exists.
+   */
+  private async ensureFolder(path: string): Promise<void> {
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFolder) return;
+    if (existing instanceof TFile) return;
+
+    const parts = path.split("/");
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      const file = this.app.vault.getAbstractFileByPath(current);
+      if (!file) {
+        try {
+          await this.app.vault.createFolder(current);
+        } catch {
+          // ignore concurrent creation
+        }
+      }
+    }
+  }
+
+  /**
+   * Developer logging helper: append to .llm_bridges/logs/debug.log when enabled
+   */
+  async devLog(message: string): Promise<void> {
+    if (!this.settings.developerMode) return;
+    const logsDir = ".llm_bridges/logs";
+    await this.ensureFolder(logsDir);
+    const logPath = `${logsDir}/debug.log`;
+    const entry = `[${new Date().toISOString()}] ${message}\n`;
+    const file = this.app.vault.getAbstractFileByPath(logPath);
+    if (file instanceof TFile) {
+      const current = await this.app.vault.read(file);
+      await this.app.vault.modify(file, current + entry);
+    } else {
+      await this.app.vault.create(logPath, entry);
+    }
+  }
+
+  /**
+   * Lightweight integration test: create KB, add constraint, validate a bad note
+   */
+  async runIntegrationTest(): Promise<void> {
+    if (!this.settings.developerMode) {
+      new Notice("Enable Developer Mode to run integration tests");
+      return;
+    }
+
+    const kbName = `llmbridges_test_${Date.now()}`;
+    const kbSubfolder = `llm_bridges_tests/${kbName}`;
+    await this.devLog(`Integration test start: ${kbName}`);
+
+    try {
+      const kb = await this.kbManager.addKnowledgeBase(
+        kbName,
+        "LLM Bridges integration test",
+        kbSubfolder,
+        "notes must start with test_ prefix"
+      );
+      await this.devLog(`KB created: ${kb.name} subfolder=${kb.subfolder}`);
+
+      const constraint = await this.kbManager.addFolderConstraint(kbName, kb.subfolder, {
+        filename: { pattern: "^test_" },
+        frontmatter: {
+          required_fields: [
+            { name: "title", type: "string" },
+          ],
+        },
+        content: {
+          min_length: 20,
+          required_sections: ["## Summary"],
+        },
+      });
+      await this.devLog(`Constraint added on ${constraint.subfolder} filename=${constraint.rules.filename?.pattern}`);
+
+      const list = await this.kbManager.listKnowledgeBases();
+      const found = list.some((k) => k.name === kbName);
+      await this.devLog(`List contains KB: ${found}`);
+      if (!found) throw new Error("KB not returned by listKnowledgeBases");
+
+      const badNotePath = `${kb.subfolder}/bad_note.md`;
+      const badContent = "short\n\n(no summary)";
+      const validation = validateNote(badNotePath, badContent, constraint);
+      await this.devLog(`Validation passed=${validation.passed} issues=${JSON.stringify(validation.issues)}`);
+      if (validation.passed) {
+        throw new Error("Hard rule should have blocked bad filename/frontmatter/content");
+      }
+      const requiredChecks = ["filename", "frontmatter.title", "content"];
+      const hitAll = requiredChecks.every((key) =>
+        validation.issues.some((i) => (i.field || "").includes(key) || (i.message || "").includes("Required") || (i.error || "").includes("invalid"))
+      );
+      if (!hitAll) {
+        throw new Error("Not all constraint types were triggered (filename/frontmatter/content)");
+      }
+
+      new Notice("Integration test passed");
+      await this.devLog("Integration test passed");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.devLog(`Integration test failed: ${message}`);
+      new Notice(`Integration test failed: ${message}`);
+    }
   }
 
   stopServer() {
@@ -1604,6 +1713,35 @@ class LLMBridgesSettingTab extends PluginSettingTab {
           this.plugin.restartServer();
         })
       );
+
+    // ===========================================================================
+    // Developer Settings
+    // ===========================================================================
+    containerEl.createEl("h3", { text: "Developer" });
+
+    new Setting(containerEl)
+      .setName("Developer Mode")
+      .setDesc("Enable verbose logging to .llm_bridges/logs/debug.log and developer utilities")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.developerMode)
+          .onChange(async (value) => {
+            this.plugin.settings.developerMode = value;
+            await this.plugin.saveSettings();
+            new Notice(value ? "Developer mode enabled" : "Developer mode disabled");
+          })
+      );
+
+    if (this.plugin.settings.developerMode) {
+      new Setting(containerEl)
+        .setName("Run Integration Test")
+        .setDesc("Creates a test KB, lists KBs, and validates a rule-blocked note. Logs to .llm_bridges/logs/debug.log.")
+        .addButton((btn) =>
+          btn.setButtonText("Run").onClick(() => {
+            this.plugin.runIntegrationTest();
+          })
+        );
+    }
 
     // ===========================================================================
     // OpenAPI Settings
