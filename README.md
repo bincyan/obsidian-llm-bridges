@@ -171,6 +171,8 @@ OAuth provides better security with automatic token refresh and granular permiss
 
 > **Note**: ChatGPT requires HTTPS. You must configure a reverse proxy with SSL certificates (see step 5).
 
+> Release hygiene: tags should align with the plugin version (manifest/package/versions). If a tag is removed for any reason, re-tag from the latest main commit to let the release workflow rebuild assets for BRAT/Obsidian.
+
 ### 5. (Optional) Configure Reverse Proxy for HTTPS
 
 For web-based LLMs (ChatGPT, Claude web), set up a reverse proxy with HTTPS:

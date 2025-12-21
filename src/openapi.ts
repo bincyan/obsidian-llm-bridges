@@ -507,11 +507,13 @@ export function getSwaggerUIHtml(openApiUrl: string, title: string): string {
 export interface OpenAPISettings {
   enabled: boolean;
   port: number;
+  publicUrl?: string; // optional explicit public URL override for OpenAPI
 }
 
 export const DEFAULT_OPENAPI_SETTINGS: OpenAPISettings = {
   enabled: false,
   port: 3101,
+  publicUrl: "",
 };
 
 // Callback types for tool execution
@@ -773,13 +775,25 @@ export class OpenAPIServer {
    * mixed-content/CORS failures when accessed via HTTPS reverse proxies.
    */
   private getServerUrlFromRequest(req: http.IncomingMessage): string {
-    if (this.publicUrl) {
-      return this.publicUrl.replace(/\/$/, "");
-    }
-
     const forwardedProto = (req.headers["x-forwarded-proto"] as string) || null;
     const forwardedHost = (req.headers["x-forwarded-host"] as string) || null;
     const host = forwardedHost || req.headers.host;
+
+    // If a publicUrl exists, prefer it but adjust host/proto from forwarded headers when present.
+    if (this.publicUrl) {
+      try {
+        const url = new URL(this.publicUrl);
+        if (host) {
+          url.host = host;
+        }
+        if (forwardedProto) {
+          url.protocol = `${forwardedProto}:`;
+        }
+        return url.toString().replace(/\/$/, "");
+      } catch {
+        // fall through to header-derived
+      }
+    }
 
     if (host) {
       const proto = forwardedProto || "http";

@@ -57,6 +57,13 @@ export class KBManager {
     return `${this.getKBPath(kbName)}/${FOLDER_CONSTRAINTS_DIR}`;
   }
 
+  /**
+   * Metadata cache path for KB listings
+   */
+  private getMetadataPath(): string {
+    return `${this.getKBBasePath()}/metadata.json`;
+  }
+
   // ============================================================================
   // Knowledge Base Operations
   // ============================================================================
@@ -66,34 +73,25 @@ export class KBManager {
    */
   async listKnowledgeBases(): Promise<KnowledgeBaseSummary[]> {
     const basePath = this.getKBBasePath();
-    const baseFolder = this.app.vault.getAbstractFileByPath(basePath);
+    // Ensure base folder exists so we don't return empty just because the root hasn't been created yet
+    await this.ensureFolder(basePath);
 
-    if (!(baseFolder instanceof TFolder)) {
-      return [];
+    // Try metadata cache first
+    const cached = await this.loadMetadataCache();
+    if (cached && cached.length > 0) {
+      await this.logDev(`KB cache hit (${cached.length} entries)`);
+      return cached;
     }
 
-    const kbs: KnowledgeBaseSummary[] = [];
-
-    for (const child of baseFolder.children) {
-      if (child instanceof TFolder) {
-        try {
-          const kb = await this.getKnowledgeBase(child.name);
-          if (kb) {
-            kbs.push({
-              name: kb.name,
-              description: kb.description,
-              subfolder: kb.subfolder,
-              create_time: kb.create_time,
-              organization_rules_preview: kb.organization_rules.slice(0, 200) +
-                (kb.organization_rules.length > 200 ? '...' : ''),
-            });
-          }
-        } catch {
-          // Skip invalid KBs
-        }
-      }
+    // Rebuild cache by scanning folders
+    const kbs = await this.scanKnowledgeBases();
+    await this.logDev(`KB cache rebuild: found ${kbs.length} entries`);
+    try {
+      await this.saveMetadataCache(kbs);
+    } catch (error) {
+      await this.logDev(`KB cache save failed: ${error instanceof Error ? error.message : String(error)}`);
+      // Ignore cache write errors to avoid breaking the API
     }
-
     return kbs;
   }
 
@@ -104,11 +102,19 @@ export class KBManager {
     const metaPath = this.getMetaPath(name);
     const file = this.app.vault.getAbstractFileByPath(metaPath);
 
-    if (!(file instanceof TFile)) {
+    let content: string | null = null;
+
+    if (file instanceof TFile) {
+      content = await this.app.vault.read(file);
+    } else {
+      // Fallback for environments where .llm_bridges may not be indexed by the vault
+      content = await this.readFileWithAdapter(metaPath);
+    }
+
+    if (!content) {
       return null;
     }
 
-    const content = await this.app.vault.read(file);
     return this.parseKBMeta(name, content);
   }
 
@@ -159,6 +165,16 @@ export class KBManager {
 
     // Ensure KB subfolder exists in vault
     await this.ensureFolder(kb.subfolder);
+
+    // Update metadata cache
+    const summary: KnowledgeBaseSummary = {
+      name: kb.name,
+      description: kb.description,
+      subfolder: kb.subfolder,
+      create_time: kb.create_time,
+      organization_rules_preview: this.getOrganizationRulesPreview(kb.organization_rules),
+    };
+    await this.updateMetadataCache(summary);
 
     return kb;
   }
@@ -211,6 +227,16 @@ export class KBManager {
     if (updates.subfolder) {
       await this.ensureFolder(updatedKB.subfolder);
     }
+
+    // Refresh metadata cache to keep listings up-to-date
+    const summary: KnowledgeBaseSummary = {
+      name: updatedKB.name,
+      description: updatedKB.description,
+      subfolder: updatedKB.subfolder,
+      create_time: updatedKB.create_time,
+      organization_rules_preview: this.getOrganizationRulesPreview(updatedKB.organization_rules),
+    };
+    await this.updateMetadataCache(summary);
 
     return updatedKB;
   }
@@ -640,7 +666,15 @@ ${rulesYaml}
       currentPath = currentPath ? `${currentPath}/${part}` : part;
       const folder = this.app.vault.getAbstractFileByPath(currentPath);
       if (!folder) {
-        await this.app.vault.createFolder(currentPath);
+        try {
+          await this.app.vault.createFolder(currentPath);
+        } catch (error) {
+          // Obsidian may throw if the folder was concurrently created or already exists
+          if (error instanceof Error && /already exists/i.test(error.message)) {
+            continue;
+          }
+          throw error;
+        }
       }
     }
   }
@@ -659,9 +693,219 @@ ${rulesYaml}
     const normA = this.normalizePath(a);
     const normB = this.normalizePath(b);
 
-    return normA.startsWith(normB + '/') ||
-           normB.startsWith(normA + '/') ||
-           normA === normB;
+    // Exact match means overlap
+    if (normA === normB) return true;
+
+    // If either is empty after normalization, treat as no overlap
+    if (!normA || !normB) return false;
+
+    // Prevent false positives when one folder name is a prefix of another segment
+    const withSlashA = normA.endsWith('/') ? normA : `${normA}/`;
+    const withSlashB = normB.endsWith('/') ? normB : `${normB}/`;
+
+    return withSlashA.startsWith(withSlashB) || withSlashB.startsWith(withSlashA);
+  }
+
+  /**
+   * Load metadata cache if available
+   */
+  private async loadMetadataCache(): Promise<KnowledgeBaseSummary[] | null> {
+    const metadataPath = this.getMetadataPath();
+    const file = this.app.vault.getAbstractFileByPath(metadataPath);
+    let content: string | null = null;
+
+    if (file instanceof TFile) {
+      content = await this.app.vault.read(file);
+    } else {
+      // Hidden folders may not be indexed by the vault; fall back to direct adapter reads
+      content = await this.readFileWithAdapter(metadataPath);
+    }
+
+    if (!content) return null;
+
+    try {
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed.knowledge_bases)) {
+        const kbs = parsed.knowledge_bases as KnowledgeBaseSummary[];
+        // If cache is empty, force rebuild
+        if (!kbs.length) return null;
+        await this.logDev(`Loaded KB cache from metadata.json (${kbs.length} entries)`);
+        return kbs;
+      }
+    } catch (error) {
+      console.warn('[LLM Bridges] Failed to read KB metadata cache:', error);
+      await this.logDev(`Failed to read KB cache: ${error}`);
+    }
+
+    return null;
+  }
+
+  /**
+   * Save metadata cache
+   */
+  private async saveMetadataCache(kbs: KnowledgeBaseSummary[]): Promise<void> {
+    const metadataPath = this.getMetadataPath();
+    await this.ensureFolder(this.getKBBasePath());
+
+    const payload = {
+      updated_at: new Date().toISOString(),
+      knowledge_bases: kbs,
+    };
+
+    const file = this.app.vault.getAbstractFileByPath(metadataPath);
+    const content = JSON.stringify(payload, null, 2);
+
+    if (file instanceof TFile) {
+      await this.app.vault.modify(file, content);
+    } else {
+      try {
+        await this.app.vault.create(metadataPath, content);
+      } catch (error) {
+        // If file was created concurrently, fall back to modify
+        if (error instanceof Error && /already exists/i.test(error.message)) {
+          const existing = this.app.vault.getAbstractFileByPath(metadataPath);
+          if (existing instanceof TFile) {
+            await this.app.vault.modify(existing, content);
+            await this.logDev("KB cache file existed; modified existing metadata.json");
+            return;
+          }
+        }
+        throw error;
+      }
+    }
+    await this.logDev(`KB cache saved (${kbs.length} entries) to metadata.json`);
+  }
+
+  /**
+   * Rebuild metadata cache by scanning folders
+   */
+  private async scanKnowledgeBases(): Promise<KnowledgeBaseSummary[]> {
+    const basePath = this.getKBBasePath();
+    const baseFolder = this.app.vault.getAbstractFileByPath(basePath);
+
+    const folderNames: string[] = [];
+    if (baseFolder instanceof TFolder) {
+      for (const child of baseFolder.children) {
+        if (child instanceof TFolder) {
+          folderNames.push(child.name);
+        }
+      }
+    } else {
+      // Fallback for environments where .llm_bridges isn't indexed by Obsidian
+      const adapterFolders = await this.listKBFolderNamesWithAdapter(basePath);
+      if (!adapterFolders.length) {
+        return [];
+      }
+      folderNames.push(...adapterFolders);
+    }
+
+    const kbs: KnowledgeBaseSummary[] = [];
+
+    for (const folderName of folderNames) {
+      try {
+        const kb = await this.getKnowledgeBase(folderName);
+        if (kb) {
+          kbs.push({
+            name: kb.name,
+            description: kb.description,
+            subfolder: kb.subfolder,
+            create_time: kb.create_time,
+            organization_rules_preview: this.getOrganizationRulesPreview(kb.organization_rules),
+          });
+          await this.logDev(`KB scanned: ${kb.name} subfolder=${kb.subfolder}`);
+        }
+      } catch (error) {
+        console.warn(`[LLM Bridges] Skipping invalid knowledge base folder '${folderName}':`, error);
+        await this.logDev(`KB scan skip '${folderName}': ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    return kbs;
+  }
+
+  /**
+   * Update metadata cache with a single KB summary
+   */
+  private async updateMetadataCache(summary: KnowledgeBaseSummary): Promise<void> {
+    let cache = await this.loadMetadataCache();
+    if (!cache) {
+      cache = await this.scanKnowledgeBases();
+    }
+
+    const idx = cache.findIndex((kb) => kb.name === summary.name);
+    if (idx >= 0) {
+      cache[idx] = summary;
+    } else {
+      cache.push(summary);
+    }
+
+    await this.saveMetadataCache(cache);
+  }
+
+  /**
+   * Preview helper for organization rules
+   */
+  private getOrganizationRulesPreview(rules: string): string {
+    const trimmed = rules || '';
+    if (trimmed.length <= 200) return trimmed;
+    return `${trimmed.slice(0, 200)}...`;
+  }
+
+  /**
+   * Read a file directly via the vault adapter (useful when hidden folders aren't indexed)
+   */
+  private async readFileWithAdapter(path: string): Promise<string | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapter = (this.app.vault as any).adapter;
+    if (!adapter || typeof adapter.exists !== 'function' || typeof adapter.read !== 'function') {
+      return null;
+    }
+
+    try {
+      if (await adapter.exists(path)) {
+        return await adapter.read(path);
+      }
+    } catch (error) {
+      await this.logDev(`Adapter read failed for ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return null;
+  }
+
+  /**
+   * List KB folder names using the adapter (fallback when vault indexing doesn't include .llm_bridges)
+   */
+  private async listKBFolderNamesWithAdapter(basePath: string): Promise<string[]> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapter = (this.app.vault as any).adapter;
+    if (!adapter || typeof adapter.list !== 'function') {
+      return [];
+    }
+
+    try {
+      const listing = await adapter.list(basePath);
+      const folders: string[] = Array.isArray(listing?.folders) ? listing.folders : [];
+
+      return folders
+        .map((path: string) => path.replace(/\\/g, '/').replace(/\/+$/, ''))
+        .map((path) => path.split('/').pop() || '')
+        .filter(Boolean);
+    } catch (error) {
+      await this.logDev(
+        `Adapter folder list failed for ${basePath}: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Developer logging (delegated to plugin, if available)
+   */
+  private async logDev(message: string): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyThis = this as any;
+    if (anyThis.plugin && typeof anyThis.plugin.devLog === 'function') {
+      await anyThis.plugin.devLog(message);
+    }
   }
 
   /**

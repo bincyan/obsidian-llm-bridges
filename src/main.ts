@@ -69,6 +69,7 @@ interface LLMBridgesSettings {
   authMethod: AuthMethod; // Authentication method: API Key or OAuth 2.1
   oauth: OAuthSettings;   // OAuth 2.1 settings
   openapi: OpenAPISettings; // OpenAPI server settings
+  developerMode: boolean; // Enable developer logging and utilities
 }
 
 const DEFAULT_SETTINGS: LLMBridgesSettings = {
@@ -79,6 +80,7 @@ const DEFAULT_SETTINGS: LLMBridgesSettings = {
   authMethod: "apiKey",
   oauth: DEFAULT_OAUTH_SETTINGS,
   openapi: DEFAULT_OPENAPI_SETTINGS,
+  developerMode: false,
 };
 
 export default class LLMBridgesPlugin extends Plugin {
@@ -223,18 +225,27 @@ export default class LLMBridgesPlugin extends Plugin {
     return `http://${this.settings.bindAddress}:${this.settings.port}`;
   }
 
-  private getOpenAPIPublicUrl(): string {
-    // For OpenAPI server, construct a proper public URL
-    // If publicUrl is set, derive the OpenAPI URL from it (different port)
+  getOpenAPIPublicUrl(): string {
+    // Prefer explicit OpenAPI public URL if provided
+    if (this.settings.openapi.publicUrl) {
+      try {
+        const url = new URL(this.settings.openapi.publicUrl);
+        return url.toString().replace(/\/$/, '');
+      } catch {
+        // Invalid URL, fall back to shared publicUrl logic
+      }
+    }
+
+    // Fall back to shared publicUrl as-is (do NOT force port change)
     if (this.settings.publicUrl) {
       try {
         const url = new URL(this.settings.publicUrl);
-        url.port = String(this.settings.openapi.port);
         return url.toString().replace(/\/$/, '');
       } catch {
         // Invalid URL, fall back to localhost
       }
     }
+
     // Default to localhost (not bind address which may be 0.0.0.0)
     return `http://127.0.0.1:${this.settings.openapi.port}`;
   }
@@ -426,6 +437,112 @@ export default class LLMBridgesPlugin extends Plugin {
     });
   }
 
+  /**
+   * Ensure folder exists (recursive). No-op if it already exists.
+   */
+  private async ensureFolder(path: string): Promise<void> {
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFolder) return;
+    if (existing instanceof TFile) return;
+
+    const parts = path.split("/");
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      const file = this.app.vault.getAbstractFileByPath(current);
+      if (!file) {
+        try {
+          await this.app.vault.createFolder(current);
+        } catch {
+          // ignore concurrent creation
+        }
+      }
+    }
+  }
+
+  /**
+   * Developer logging helper: append to .llm_bridges/logs/debug.log when enabled
+   */
+  async devLog(message: string): Promise<void> {
+    if (!this.settings.developerMode) return;
+    const logsDir = ".llm_bridges/logs";
+    await this.ensureFolder(logsDir);
+    const logPath = `${logsDir}/debug.log`;
+    const entry = `[${new Date().toISOString()}] ${message}\n`;
+    const file = this.app.vault.getAbstractFileByPath(logPath);
+    if (file instanceof TFile) {
+      const current = await this.app.vault.read(file);
+      await this.app.vault.modify(file, current + entry);
+    } else {
+      await this.app.vault.create(logPath, entry);
+    }
+  }
+
+  /**
+   * Lightweight integration test: create KB, add constraint, validate a bad note
+   */
+  async runIntegrationTest(): Promise<void> {
+    if (!this.settings.developerMode) {
+      new Notice("Enable Developer Mode to run integration tests");
+      return;
+    }
+
+    const kbName = `llmbridges_test_${Date.now()}`;
+    const kbSubfolder = `llm_bridges_tests/${kbName}`;
+    await this.devLog(`Integration test start: ${kbName}`);
+
+    try {
+      const kb = await this.kbManager.addKnowledgeBase(
+        kbName,
+        "LLM Bridges integration test",
+        kbSubfolder,
+        "notes must start with test_ prefix"
+      );
+      await this.devLog(`KB created: ${kb.name} subfolder=${kb.subfolder}`);
+
+      const constraint = await this.kbManager.addFolderConstraint(kbName, kb.subfolder, {
+        filename: { pattern: "^test_" },
+        frontmatter: {
+          required_fields: [
+            { name: "title", type: "string" },
+          ],
+        },
+        content: {
+          min_length: 20,
+          required_sections: ["## Summary"],
+        },
+      });
+      await this.devLog(`Constraint added on ${constraint.subfolder} filename=${constraint.rules.filename?.pattern}`);
+
+      const list = await this.kbManager.listKnowledgeBases();
+      const found = list.some((k) => k.name === kbName);
+      await this.devLog(`List contains KB: ${found}`);
+      if (!found) throw new Error("KB not returned by listKnowledgeBases");
+
+      const badNotePath = `${kb.subfolder}/bad_note.md`;
+      const badContent = "short\n\n(no summary)";
+      const validation = validateNote(badNotePath, badContent, constraint);
+      await this.devLog(`Validation passed=${validation.passed} issues=${JSON.stringify(validation.issues)}`);
+      if (validation.passed) {
+        throw new Error("Hard rule should have blocked bad filename/frontmatter/content");
+      }
+      const requiredChecks = ["filename", "frontmatter.title", "content"];
+      const hitAll = requiredChecks.every((key) =>
+        validation.issues.some((i) => (i.field || "").includes(key) || (i.message || "").includes("Required") || (i.error || "").includes("invalid"))
+      );
+      if (!hitAll) {
+        throw new Error("Not all constraint types were triggered (filename/frontmatter/content)");
+      }
+
+      new Notice("Integration test passed");
+      await this.devLog("Integration test passed");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.devLog(`Integration test failed: ${message}`);
+      new Notice(`Integration test failed: ${message}`);
+    }
+  }
+
   stopServer() {
     // Close all SSE connections
     for (const [sessionId, res] of this.sessions) {
@@ -450,10 +567,11 @@ export default class LLMBridgesPlugin extends Plugin {
     if (this.openApiServer) {
       this.openApiServer.updateSettings(this.settings.openapi, this.settings.bindAddress, this.getOpenAPIPublicUrl());
       this.openApiServer.restart();
-      if (this.settings.openapi.enabled) {
-        new Notice(`OpenAPI server restarted on port ${this.settings.openapi.port}`);
-      }
+    if (this.settings.openapi.enabled) {
+      new Notice(`OpenAPI server restarted on port ${this.settings.openapi.port}`);
     }
+  }
+
   }
 
   private async handleOAuthRequest(
@@ -1292,22 +1410,6 @@ export default class LLMBridgesPlugin extends Plugin {
   // Utility Methods
   // ===========================================================================
 
-  private async ensureFolder(path: string): Promise<void> {
-    const existing = this.app.vault.getAbstractFileByPath(path);
-    if (existing) return;
-
-    const parts = path.split("/");
-    let currentPath = "";
-
-    for (const part of parts) {
-      currentPath = currentPath ? `${currentPath}/${part}` : part;
-      const folder = this.app.vault.getAbstractFileByPath(currentPath);
-      if (!folder) {
-        await this.app.vault.createFolder(currentPath);
-      }
-    }
-  }
-
   copyMCPConfig() {
     let config;
 
@@ -1596,6 +1698,11 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       );
 
     // ===========================================================================
+    // Developer Settings
+    // ===========================================================================
+    containerEl.createEl("h3", { text: "Developer" });
+
+    // ===========================================================================
     // OpenAPI Settings
     // ===========================================================================
     containerEl.createEl("h3", { text: "OpenAPI Server" });
@@ -1644,10 +1751,23 @@ class LLMBridgesSettingTab extends PluginSettingTab {
             })
         );
 
+      new Setting(containerEl)
+        .setName("OpenAPI Public URL")
+        .setDesc("Full public URL for OpenAPI/Swagger (e.g., https://example.com). Overrides Public URL/port.")
+        .addText((text) =>
+          text
+            .setValue(this.plugin.settings.openapi.publicUrl || "")
+            .setPlaceholder("https://example.com")
+            .onChange(async (value) => {
+              this.plugin.settings.openapi.publicUrl = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+
       // OpenAPI Endpoints Info
       const openApiEndpointsEl = containerEl.createEl("div", { cls: "llm-bridges-openapi-endpoints" });
       openApiEndpointsEl.createEl("h4", { text: "OpenAPI Endpoints" });
-      const openApiUrl = `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.openapi.port}`;
+      const openApiUrl = this.plugin.getOpenAPIPublicUrl();
       const endpointsList = openApiEndpointsEl.createEl("ul");
       endpointsList.createEl("li", {
         text: `Swagger UI: ${openApiUrl}/docs`,
@@ -1704,11 +1824,9 @@ class LLMBridgesSettingTab extends PluginSettingTab {
       text: "Add this to your Claude Desktop configuration:",
     });
 
-    const configEl = containerEl.createEl("pre", {
-      cls: "llm-bridges-config",
-    });
-
+    const configEl = containerEl.createEl("pre", { cls: "llm-bridges-config" });
     const serverUrl = this.plugin.settings.publicUrl || `http://${this.plugin.settings.bindAddress}:${this.plugin.settings.port}`;
+
     if (this.plugin.settings.authMethod === "oauth") {
       configEl.setText(`{
   "mcpServers": {
@@ -1749,6 +1867,36 @@ the authorization endpoints and prompt you to authorize.`);
     locationsEl.createEl("li", {
       text: "Windows: %APPDATA%\\Claude\\claude_desktop_config.json",
     });
+
+    // ===========================================================================
+    // Developer Settings (bottom)
+    // ===========================================================================
+    containerEl.createEl("h3", { text: "Developer" });
+
+    new Setting(containerEl)
+      .setName("Developer Mode")
+      .setDesc("Enable verbose logging to .llm_bridges/logs/debug.log and developer utilities")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.developerMode)
+          .onChange(async (value) => {
+            this.plugin.settings.developerMode = value;
+            await this.plugin.saveSettings();
+            new Notice(value ? "Developer mode enabled" : "Developer mode disabled");
+            this.display();
+          })
+      );
+
+    if (this.plugin.settings.developerMode) {
+      new Setting(containerEl)
+        .setName("Run Integration Test")
+        .setDesc("Creates a test KB, lists KBs, validates filename/frontmatter/content rules; logs to .llm_bridges/logs/debug.log.")
+        .addButton((btn) =>
+          btn.setButtonText("Run").onClick(() => {
+            this.plugin.runIntegrationTest();
+          })
+        );
+    }
 
     // Version info
     const versionEl = containerEl.createEl("div", { cls: "llm-bridges-version" });

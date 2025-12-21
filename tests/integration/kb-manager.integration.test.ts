@@ -489,3 +489,64 @@ describe('KBManager with Pre-populated Vault', () => {
     expect(kbs[0].name).toBe('listed-kb');
   });
 });
+
+describe('KBManager adapter fallback', () => {
+  it('should list KBs even when .llm_bridges is only visible via adapter', async () => {
+    const metaPath = '.llm_bridges/knowledge_base/test/meta.md';
+    const metadataPath = '.llm_bridges/knowledge_base/metadata.json';
+    const metaContent = `---
+create_time: "2024-01-01T00:00:00Z"
+description: "Adapter KB"
+subfolder: "test"
+---
+
+Rules`;
+
+    const adapterFiles = new Map<string, string>([[metaPath, metaContent]]);
+    const adapterFolders = new Set<string>([
+      '.llm_bridges',
+      '.llm_bridges/knowledge_base',
+      '.llm_bridges/knowledge_base/test',
+    ]);
+
+    const adapter = {
+      exists: vi.fn(async (path: string) => adapterFiles.has(path) || adapterFolders.has(path)),
+      read: vi.fn(async (path: string) => {
+        const content = adapterFiles.get(path);
+        if (content === undefined) throw new Error('not found');
+        return content;
+      }),
+      list: vi.fn(async (path: string) => {
+        const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+        const depth = normalized.split('/').length + 1;
+        const folders = Array.from(adapterFolders).filter(
+          (folder) => folder.startsWith(`${normalized}/`) && folder.split('/').length === depth
+        );
+        return { files: [], folders };
+      }),
+    };
+
+    const vault = {
+      adapter,
+      getAbstractFileByPath: () => null,
+      createFolder: async (path: string) => {
+        adapterFolders.add(path);
+      },
+      create: async (path: string, content: string) => {
+        adapterFiles.set(path, content);
+      },
+      modify: async (_file: unknown, content: string) => {
+        adapterFiles.set(metadataPath, content);
+      },
+    };
+
+    const appWithAdapter = { vault } as unknown as App;
+    const kbManager = new KBManager(appWithAdapter as any);
+
+    const kbs = await kbManager.listKnowledgeBases();
+
+    expect(kbs).toHaveLength(1);
+    expect(kbs[0].name).toBe('test');
+    expect(adapter.list).toHaveBeenCalled();
+  });
+});
