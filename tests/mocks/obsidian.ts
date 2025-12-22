@@ -50,6 +50,7 @@ export type TAbstractFile = TFile | TFolder;
 export class Vault {
   private files: Map<string, string> = new Map();
   private folderObjects: Map<string, TFolder> = new Map();
+  private vaultName = 'test-vault';
 
   // ============================================================================
   // Test Helpers
@@ -256,6 +257,44 @@ export class Vault {
     return [...files, ...folders];
   }
 
+  getMarkdownFiles(): TFile[] {
+    return this.getFiles().filter((file) => file.extension === 'md');
+  }
+
+  async cachedRead(file: TFile): Promise<string> {
+    return this.read(file);
+  }
+
+  getName(): string {
+    return this.vaultName;
+  }
+
+  getRoot(): TFolder {
+    const root = new TFolder('');
+    const topLevelFolders = Array.from(this.folderObjects.keys()).filter(
+      (path) => path !== '' && !path.includes('/')
+    );
+    const topLevelFiles = Array.from(this.files.keys()).filter((path) => !path.includes('/'));
+
+    for (const folderPath of topLevelFolders) {
+      const folder = this.folderObjects.get(folderPath);
+      if (folder) {
+        folder.parent = root;
+        if (!root.children.some((child) => child.path === folderPath)) {
+          root.children.push(folder);
+        }
+      }
+    }
+
+    for (const filePath of topLevelFiles) {
+      const file = new TFile(filePath);
+      file.parent = root;
+      root.children.push(file);
+    }
+
+    return root;
+  }
+
   /**
    * Check if a file or folder exists
    */
@@ -267,9 +306,23 @@ export class Vault {
 // Mock App
 export class App {
   vault: Vault;
+  commands: {
+    commands: Record<string, Command>;
+    executeCommandById(id: string): boolean;
+  };
+  workspace: {
+    getActiveFile(): TFile | null;
+  };
 
   constructor() {
     this.vault = new Vault();
+    this.commands = {
+      commands: {},
+      executeCommandById: () => false,
+    };
+    this.workspace = {
+      getActiveFile: () => null,
+    };
   }
 }
 
@@ -431,4 +484,19 @@ ${organizationRules}`;
   vault._addFolder(subfolder);
 
   return app;
+}
+
+export function prepareSimpleSearch(query: string) {
+  return (content: string) => {
+    if (!query) return null;
+    const matches: Array<[number, number]> = [];
+    let index = 0;
+    while (true) {
+      const found = content.indexOf(query, index);
+      if (found === -1) break;
+      matches.push([found, found + query.length]);
+      index = found + Math.max(1, query.length);
+    }
+    return matches.length ? { matches } : null;
+  };
 }
