@@ -2716,6 +2716,14 @@ data: ${JSON.stringify(response)}
   async handleMCPToolCall(params) {
     const { name, arguments: args } = params;
     let result;
+    const buildValidationResponse = (kb, validation, constraint) => ({
+      kb_rules: kb.organization_rules || "",
+      issues: validation.issues,
+      ...(constraint ? { folder_constraint: constraint } : {})
+    });
+    const buildValidationInstruction = (kb) => (
+      `Please check your note MUST following rules:\n\n${kb.organization_rules || ""}\n\nIf any issues are found, call update_note with corrected content.`
+    );
     switch (name) {
       case "list_knowledge_bases": {
         const kbs = await this.kbManager.listKnowledgeBases();
@@ -2797,7 +2805,12 @@ data: ${JSON.stringify(response)}
         if (folderPath)
           await this.ensureFolder(folderPath);
         await this.app.vault.create(resolvedPath, args.note_content);
-        result = { path: resolvedPath, validation };
+        result = {
+          path: resolvedPath,
+          content: args.note_content,
+          validation: buildValidationResponse(kb, validation, constraint),
+          validation_instruction_for_llm: buildValidationInstruction(kb)
+        };
         break;
       }
       case "read_note": {
@@ -2828,16 +2841,23 @@ data: ${JSON.stringify(response)}
         const file = this.app.vault.getAbstractFileByPath(resolvedPath);
         if (!(file instanceof import_obsidian2.TFile))
           throw new Error(`Note not found at '${resolvedPath}'`);
+        const originalContent = await this.app.vault.read(file);
         const constraints = await this.kbManager.getFolderConstraints(kb.name);
         const constraint = findApplicableConstraint(resolvedPath, constraints);
+        let validation = { passed: true, issues: [] };
         if (constraint) {
-          const validation = validateNote(resolvedPath, args.note_content, constraint);
+          validation = validateNote(resolvedPath, args.note_content, constraint);
           if (!validation.passed) {
             throw new Error(`Validation failed: ${validation.issues.map((i) => i.message).join(", ")}`);
           }
         }
         await this.app.vault.modify(file, args.note_content);
-        result = { path: resolvedPath, success: true };
+        result = {
+          original_note: { path: resolvedPath, content: originalContent },
+          updated_note: { path: resolvedPath, content: args.note_content },
+          validation: buildValidationResponse(kb, validation, constraint),
+          validation_instruction_for_llm: buildValidationInstruction(kb)
+        };
         break;
       }
       case "append_note": {
@@ -2852,14 +2872,20 @@ data: ${JSON.stringify(response)}
         const newContent = existingContent.endsWith("\n") ? existingContent + args.note_content : existingContent + "\n" + args.note_content;
         const constraints = await this.kbManager.getFolderConstraints(kb.name);
         const constraint = findApplicableConstraint(resolvedPath, constraints);
+        let validation = { passed: true, issues: [] };
         if (constraint) {
-          const validation = validateNote(resolvedPath, newContent, constraint);
+          validation = validateNote(resolvedPath, newContent, constraint);
           if (!validation.passed) {
             throw new Error(`Validation failed: ${validation.issues.map((i) => i.message).join(", ")}`);
           }
         }
         await this.app.vault.modify(file, newContent);
-        result = { path: resolvedPath, success: true };
+        result = {
+          original_note: { path: resolvedPath, content: existingContent },
+          updated_note: { path: resolvedPath, content: newContent },
+          validation: buildValidationResponse(kb, validation, constraint),
+          validation_instruction_for_llm: buildValidationInstruction(kb)
+        };
         break;
       }
       case "move_note": {
@@ -2877,8 +2903,9 @@ data: ${JSON.stringify(response)}
         const content = await this.app.vault.read(originFile);
         const constraints = await this.kbManager.getFolderConstraints(kb.name);
         const constraint = findApplicableConstraint(newPath, constraints);
+        let validation = { passed: true, issues: [] };
         if (constraint) {
-          const validation = validateNote(newPath, content, constraint);
+          validation = validateNote(newPath, content, constraint);
           if (!validation.passed) {
             throw new Error(`Validation failed for new location: ${validation.issues.map((i) => i.message).join(", ")}`);
           }
@@ -2887,7 +2914,12 @@ data: ${JSON.stringify(response)}
         if (newFolderPath)
           await this.ensureFolder(newFolderPath);
         await this.app.vault.rename(originFile, newPath);
-        result = { origin_path: originPath, new_path: newPath };
+        result = {
+          origin_path: originPath,
+          new_path: newPath,
+          validation: buildValidationResponse(kb, validation, constraint),
+          validation_instruction_for_llm: buildValidationInstruction(kb)
+        };
         break;
       }
       case "delete_note": {

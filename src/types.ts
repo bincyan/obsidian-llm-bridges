@@ -69,6 +69,12 @@ export interface ValidationResult {
   issues: ValidationIssue[];
 }
 
+export interface ValidationDetails {
+  kb_rules: string;
+  issues: ValidationIssue[];
+  folder_constraint?: FolderConstraint;
+}
+
 export interface ValidationIssue {
   field: string;
   error: ValidationErrorType;
@@ -166,7 +172,7 @@ export interface AddFolderConstraintResponse {
 export interface CreateNoteResponse {
   knowledge_base: KnowledgeBase;
   note: NoteInfo;
-  machine_validation: ValidationResult;
+  validation: ValidationDetails;
   validation_instruction_for_llm: string;
 }
 
@@ -174,7 +180,7 @@ export interface UpdateNoteResponse {
   knowledge_base: KnowledgeBase;
   original_note: NoteInfo;
   updated_note: NoteInfo;
-  machine_validation: ValidationResult;
+  validation: ValidationDetails;
   validation_instruction_for_llm: string;
 }
 
@@ -182,7 +188,7 @@ export interface MoveNoteResponse {
   knowledge_base: KnowledgeBase;
   origin_path: string;
   new_path: string;
-  machine_validation: ValidationResult;
+  validation: ValidationDetails;
   validation_instruction_for_llm?: string;
 }
 
@@ -212,36 +218,27 @@ export interface ListNotesResponse {
 // ============================================================================
 
 export const VALIDATION_INSTRUCTIONS = {
-  create_note: `Please verify the note against the knowledge base's organization_rules:
+  create_note: `Please check your note MUST following rules:
 
-1. Check that the note content follows the organization guidelines
-2. Ensure the note structure matches KB conventions
-3. Verify all recommended metadata is present
+{{kb_rules}}
 
 If any issues are found, call update_note with corrected content.`,
 
-  update_note: `Please verify the update against the knowledge base's organization_rules:
+  update_note: `Please check your note MUST following rules:
 
-1. Compare original and updated content to ensure no important information was lost
-2. Check that the updated note follows the organization guidelines
-3. Verify the note structure matches KB conventions
-4. Ensure all links and references are intact
+{{kb_rules}}
 
 If any issues are found, call update_note again with corrected content.`,
 
-  append_note: `Please verify the append operation against the knowledge base's organization_rules:
+  append_note: `Please check your note MUST following rules:
 
-1. Check that the combined content makes logical sense
-2. Verify the appended content integrates well with existing content
-3. Ensure no duplicate information was introduced
-4. Check that overall note structure remains compliant
+{{kb_rules}}
 
 If any issues are found, call update_note with corrected content.`,
 
-  move_note: `Please verify the moved note against the knowledge base's organization_rules:
+  move_note: `Please check your note MUST following rules:
 
-1. Check that the note content still follows organization guidelines for its new location
-2. Verify any path-dependent content (links, references) is still valid
+{{kb_rules}}
 
 If any issues are found, call update_note with corrected content.`,
 };

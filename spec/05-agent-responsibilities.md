@@ -56,15 +56,16 @@ Agent:
 
 For every note modification (`create_note`, `update_note`, `append_note`), the agent MUST:
 
-#### Step 1: Check Machine Validation Result
+#### Step 1: Check Validation Result
 
 ```yaml
-machine_validation:
-  passed: true/false
+validation:
+  kb_rules: "..."
   issues: [...]
+  folder_constraint: {}  # Optional
 ```
 
-- **If `passed: false`**: The operation was REJECTED. No file was written.
+- **If `issues` is non-empty**: The operation was REJECTED. No file was written.
   - Read the `issues` array carefully
   - Correct the note content to satisfy all rules
   - Retry the operation with fixed content
@@ -73,13 +74,13 @@ machine_validation:
 
 Even if machine validation passes, the agent MUST:
 
-1. **Read** the KB's `organization_rules` from the response
+1. **Read** `kb_rules` from the validation response
 2. **Compare** the note content against these rules
 3. **Assess** compliance with semantic guidelines
 
 #### Step 3: Fix Issues (if any)
 
-If the note does not comply with `organization_rules`:
+If the note does not comply with `kb_rules`:
 
 1. **Identify** specific violations
 2. **Call** `update_note` with corrected content
@@ -94,22 +95,22 @@ If the note does not comply with `organization_rules`:
                       │
                       ▼
             ┌─────────────────┐
-            │ machine_validation │
-            │    .passed?        │
+            │ validation.issues │
+            │    empty?         │
             └────────┬──────────┘
                      │
          ┌───────────┴───────────┐
          │                       │
          ▼ false                 ▼ true
 ┌─────────────────┐    ┌─────────────────────────┐
-│ Read .issues    │    │ Read organization_rules │
+│ Read .issues    │    │ Read kb_rules           │
 │ Fix content     │    │ Compare note content    │
 │ Retry operation │    └───────────┬─────────────┘
 └─────────────────┘                │
                                    ▼
                          ┌─────────────────┐
                          │ Compliant with  │
-                         │ org rules?      │
+                         │ kb rules?       │
                          └────────┬────────┘
                                   │
                     ┌─────────────┴─────────────┐
@@ -255,18 +256,18 @@ Retry create_note with fixed content.
 | Requirement | When |
 |-------------|------|
 | Define folder constraints | After `add_knowledge_base` |
-| Check `machine_validation.passed` | Every note modification |
-| Read `organization_rules` | Every note modification |
+| Check `validation.issues` | Every note modification |
+| Read `kb_rules` | Every note modification |
 | Compare original vs updated | Every `update_note`/`append_note` |
 | Fix constraint violations | When `folder_constraint_violation` error |
-| Call `update_note` for semantic issues | When note doesn't match organization_rules |
+| Call `update_note` for semantic issues | When note doesn't match kb_rules |
 
 ### MUST NOT
 
 | Prohibition | Reason |
 |-------------|--------|
 | Skip validation response | May leave non-compliant notes |
-| Ignore machine validation errors | Operation was rejected, need to retry |
+| Ignore validation issues | Operation was rejected, need to retry |
 | Assume update preserved data | Must verify no information lost |
 | Operate outside KB scope | Will get `invalid_note_path` error |
 | Skip chunked reading | May miss important context |
@@ -280,9 +281,9 @@ The system provides `validation_instruction_for_llm` in responses. These are tem
 ### For `create_note`
 
 ```
-Please verify the note against the knowledge base's organization_rules:
+Please check your note MUST following rules:
 
-1. Check that the note content follows the organization guidelines
+1. Check that the note content follows the KB rules
 2. Ensure the note structure matches KB conventions
 3. Verify all recommended metadata is present
 
@@ -292,10 +293,10 @@ If any issues are found, call update_note with corrected content.
 ### For `update_note`
 
 ```
-Please verify the update against the knowledge base's organization_rules:
+Please check your note MUST following rules:
 
 1. Compare original and updated content to ensure no important information was lost
-2. Check that the updated note follows the organization guidelines
+2. Check that the updated note follows the KB rules
 3. Verify the note structure matches KB conventions
 4. Ensure all links and references are intact
 
@@ -305,7 +306,7 @@ If any issues are found, call update_note again with corrected content.
 ### For `append_note`
 
 ```
-Please verify the append operation against the knowledge base's organization_rules:
+Please check your note MUST following rules:
 
 1. Check that the combined content makes logical sense
 2. Verify the appended content integrates well with existing content
@@ -373,8 +374,8 @@ Agent:
    )
 
 5. Check response:
-   → machine_validation.passed = true
-   → Read organization_rules: "Include summary at top, link related papers..."
+   → validation.issues is empty
+   → Read kb_rules: "Include summary at top, link related papers..."
 
 6. Semantic validation:
    → Note has summary section? Yes
@@ -385,7 +386,7 @@ Agent:
 8. Verify update:
    → Original preserved? Yes
    → Link added? Yes
-   → Machine validation passed? Yes
+   → validation.issues empty? Yes
 
 9. Operation complete
 ```
