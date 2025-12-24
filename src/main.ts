@@ -1078,6 +1078,18 @@ export default class LLMBridgesPlugin extends Plugin {
   async handleMCPToolCall(params: { name: string; arguments: Record<string, unknown> }): Promise<{ content: Array<{ type: string; text: string }> }> {
     const { name, arguments: args } = params;
     let result: unknown;
+    const buildValidationResponse = (
+      kb: KnowledgeBase,
+      validation: ValidationResult,
+      constraint?: FolderConstraint
+    ) => ({
+      kb_rules: kb.organization_rules || "",
+      issues: validation.issues,
+      ...(constraint ? { folder_constraint: constraint } : {}),
+    });
+    const buildValidationInstruction = (kb: KnowledgeBase) => (
+      `Please check your note MUST following rules:\n\n${kb.organization_rules || ""}\n\nIf any issues are found, call update_note with corrected content.`
+    );
 
     switch (name) {
       // Knowledge Base Management
@@ -1174,7 +1186,12 @@ export default class LLMBridgesPlugin extends Plugin {
         if (folderPath) await this.ensureFolder(folderPath);
         await this.app.vault.create(resolvedPath, args.note_content as string);
 
-        result = { path: resolvedPath, validation };
+        result = {
+          path: resolvedPath,
+          content: args.note_content as string,
+          validation: buildValidationResponse(kb, validation, constraint),
+          validation_instruction_for_llm: buildValidationInstruction(kb),
+        };
         break;
       }
 
@@ -1208,18 +1225,26 @@ export default class LLMBridgesPlugin extends Plugin {
         const file = this.app.vault.getAbstractFileByPath(resolvedPath);
         if (!(file instanceof TFile)) throw new Error(`Note not found at '${resolvedPath}'`);
 
+        const originalContent = await this.app.vault.read(file);
+
         // Validate
         const constraints = await this.kbManager.getFolderConstraints(kb.name);
         const constraint = findApplicableConstraint(resolvedPath, constraints);
+        let validation: ValidationResult = { passed: true, issues: [] };
         if (constraint) {
-          const validation = validateNote(resolvedPath, args.note_content as string, constraint);
+          validation = validateNote(resolvedPath, args.note_content as string, constraint);
           if (!validation.passed) {
             throw new Error(`Validation failed: ${validation.issues.map(i => i.message).join(", ")}`);
           }
         }
 
         await this.app.vault.modify(file, args.note_content as string);
-        result = { path: resolvedPath, success: true };
+        result = {
+          original_note: { path: resolvedPath, content: originalContent },
+          updated_note: { path: resolvedPath, content: args.note_content as string },
+          validation: buildValidationResponse(kb, validation, constraint),
+          validation_instruction_for_llm: buildValidationInstruction(kb),
+        };
         break;
       }
 
@@ -1239,15 +1264,21 @@ export default class LLMBridgesPlugin extends Plugin {
         // Validate combined content
         const constraints = await this.kbManager.getFolderConstraints(kb.name);
         const constraint = findApplicableConstraint(resolvedPath, constraints);
+        let validation: ValidationResult = { passed: true, issues: [] };
         if (constraint) {
-          const validation = validateNote(resolvedPath, newContent, constraint);
+          validation = validateNote(resolvedPath, newContent, constraint);
           if (!validation.passed) {
             throw new Error(`Validation failed: ${validation.issues.map(i => i.message).join(", ")}`);
           }
         }
 
         await this.app.vault.modify(file, newContent);
-        result = { path: resolvedPath, success: true };
+        result = {
+          original_note: { path: resolvedPath, content: existingContent },
+          updated_note: { path: resolvedPath, content: newContent },
+          validation: buildValidationResponse(kb, validation, constraint),
+          validation_instruction_for_llm: buildValidationInstruction(kb),
+        };
         break;
       }
 
@@ -1269,8 +1300,9 @@ export default class LLMBridgesPlugin extends Plugin {
         const content = await this.app.vault.read(originFile);
         const constraints = await this.kbManager.getFolderConstraints(kb.name);
         const constraint = findApplicableConstraint(newPath, constraints);
+        let validation: ValidationResult = { passed: true, issues: [] };
         if (constraint) {
-          const validation = validateNote(newPath, content, constraint);
+          validation = validateNote(newPath, content, constraint);
           if (!validation.passed) {
             throw new Error(`Validation failed for new location: ${validation.issues.map(i => i.message).join(", ")}`);
           }
@@ -1281,7 +1313,12 @@ export default class LLMBridgesPlugin extends Plugin {
         if (newFolderPath) await this.ensureFolder(newFolderPath);
 
         await this.app.vault.rename(originFile, newPath);
-        result = { origin_path: originPath, new_path: newPath };
+        result = {
+          origin_path: originPath,
+          new_path: newPath,
+          validation: buildValidationResponse(kb, validation, constraint),
+          validation_instruction_for_llm: buildValidationInstruction(kb),
+        };
         break;
       }
 
