@@ -256,8 +256,11 @@ export async function run() {
       note_content: "---\ntitle: First\n---\nUpdated",
     },
     updatedNote,
-    ["path", "success"],
-    [(value) => ((value as any).success === true ? null : "expected success true")]
+    ["original_note", "updated_note", "validation", "validation_instruction_for_llm"],
+    [
+      (value) => ((value as any).updated_note?.content?.includes("Updated") ? null : "expected updated content"),
+      (value) => ((value as any).validation?.folder_constraint ? null : "expected folder_constraint in validation"),
+    ]
   );
 
   const appendedNote = await callTool("append_note", {
@@ -274,8 +277,11 @@ export async function run() {
       note_content: "Appended",
     },
     appendedNote,
-    ["path", "success"],
-    [(value) => ((value as any).success === true ? null : "expected success true")]
+    ["original_note", "updated_note", "validation", "validation_instruction_for_llm"],
+    [
+      (value) => ((value as any).updated_note?.content?.includes("Appended") ? null : "expected appended content"),
+      (value) => ((value as any).validation?.folder_constraint ? null : "expected folder_constraint in validation"),
+    ]
   );
 
   const movedNote = await callTool("move_note", {
