@@ -218,7 +218,7 @@ export interface ListNotesResponse {
 // ============================================================================
 
 export const VALIDATION_INSTRUCTIONS = {
-  create_note: `Please check your note MUST following rules:
+  create_note: `Please check your note MUST following organization_rules:
 
 {{kb_rules}}
 
@@ -228,15 +228,16 @@ If any issues are found, call update_note with corrected content.`,
 
 {{kb_rules}}
 
+Compare the original content with the updated content to ensure nothing important was lost.
 If any issues are found, call update_note again with corrected content.`,
 
-  append_note: `Please check your note MUST following rules:
+  append_note: `Please check your note MUST following rules after the append:
 
 {{kb_rules}}
 
 If any issues are found, call update_note with corrected content.`,
 
-  move_note: `Please check your note MUST following rules:
+  move_note: `Please check your note MUST following rules after the note is moved:
 
 {{kb_rules}}
 
