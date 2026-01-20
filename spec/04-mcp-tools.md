@@ -320,7 +320,7 @@ folder_constraint:
    - If FAIL: Reject, return error, do NOT write file
    - If PASS: Continue
 6. Write file to vault
-7. Return KB metadata, note content, and validation instructions
+7. Return KB metadata, note content, and validation details (KB rules + applicable constraint)
 
 #### Output
 
@@ -334,9 +334,10 @@ note:
   path: string
   content: string
 
-machine_validation:
-  passed: boolean
-  issues: array  # Empty if passed
+validation:
+  kb_rules: string
+  issues: array  # Empty if no issues
+  folder_constraint: object  # Optional, present when a folder constraint applies
 
 validation_instruction_for_llm: string
 ```
@@ -361,11 +362,19 @@ validation_instruction_for_llm: string
     "path": "research/ai/papers/2025-12-10-transformers.md",
     "content": "---\ntitle: Transformer Architecture\n..."
   },
-  "machine_validation": {
-    "passed": true,
-    "issues": []
+  "validation": {
+    "kb_rules": "## Guidelines\n1. One concept per note...",
+    "issues": [],
+    "folder_constraint": {
+      "kb_name": "ai-research",
+      "subfolder": "research/ai/papers",
+      "rules": {
+        "frontmatter": {...},
+        "filename": {...}
+      }
+    }
   },
-  "validation_instruction_for_llm": "Please verify the note against the knowledge base's organization_rules:\n\n1. Check that the note content follows the organization guidelines\n2. Ensure the note structure matches KB conventions\n\nIf any issues are found, call update_note with corrected content."
+  "validation_instruction_for_llm": "Please check your note MUST following rules:\n\n## Guidelines\n1. One concept per note...\n\nIf any issues are found, call update_note with corrected content."
 }
 ```
 
@@ -440,9 +449,10 @@ updated_note:
   path: string
   content: string
 
-machine_validation:
-  passed: boolean
+validation:
+  kb_rules: string
   issues: array
+  folder_constraint: object  # Optional, present when a folder constraint applies
 
 validation_instruction_for_llm: string
 ```
@@ -450,10 +460,10 @@ validation_instruction_for_llm: string
 #### Validation Instruction
 
 ```
-Please verify the update against the knowledge base's organization_rules:
+Please check your note MUST following rules:
 
 1. Compare original and updated content to ensure no important information was lost
-2. Check that the updated note follows the organization guidelines
+2. Check that the updated note follows the KB rules
 3. Verify the note structure matches KB conventions
 
 If any issues are found, call update_note again with corrected content.
@@ -536,9 +546,10 @@ knowledge_base:
 origin_path: string
 new_path: string
 
-machine_validation:
-  passed: boolean
+validation:
+  kb_rules: string
   issues: array
+  folder_constraint: object  # Optional, present when a folder constraint applies
 
 validation_instruction_for_llm: string  # Optional
 ```
@@ -730,7 +741,7 @@ notes:
 1. Resolve and validate path
 2. Read current note content
 3. Apply folder constraints (machine validation)
-4. Return validation result with organization_rules
+4. Return validation result with KB rules and applicable folder constraint
 
 #### Output
 
@@ -744,9 +755,10 @@ note:
   path: string
   content: string  # Full content or chunked
 
-machine_validation:
-  passed: boolean
+validation:
+  kb_rules: string
   issues: array
+  folder_constraint: object  # Optional, present when a folder constraint applies
 
 validation_instruction_for_llm: string
 ```

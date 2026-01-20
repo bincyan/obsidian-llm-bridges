@@ -42,9 +42,9 @@ Validation is split into two complementary layers:
 │                (Organization Rules)                     │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐   │
-│  │ • Return KB metadata + organization_rules       │   │
+│  │ • Return KB metadata + kb_rules                 │   │
 │  │ • Return note content (original + updated)      │   │
-│  │ • Return machine validation result              │   │
+│  │ • Return validation issues + folder constraint  │   │
 │  │ • Include instruction for LLM self-check        │   │
 │  └─────────────────────────────────────────────────┘   │
 │                                                         │
@@ -177,7 +177,7 @@ Enable LLM self-verification against human-readable organization rules. The syst
 
 ### Implementation
 
-Based on **organization_rules** in KB metadata:
+Based on **kb_rules** returned in the validation response (derived from KB organization_rules):
 
 ```markdown
 ## Organization Guidelines
@@ -217,14 +217,18 @@ original_note:
   content: |
     (previous content)
 
-machine_validation:
-  passed: true
+validation:
+  kb_rules: |
+    ## Organization Guidelines
+    1. Each note should focus on a single concept
+    ...
   issues: []
+  folder_constraint: {}  # Optional, present when a folder constraint applies
 
 validation_instruction_for_llm: |
-  Please verify the note against the knowledge base's organization_rules:
+  Please check your note MUST following rules:
 
-  1. Check that the note content follows the organization guidelines
+  1. Check that the note content follows the KB rules
   2. Ensure the note structure matches KB conventions
   3. For updates: verify no important information was lost
 
@@ -235,7 +239,7 @@ validation_instruction_for_llm: |
 
 When receiving a validation response, the LLM MUST:
 
-1. **Read organization_rules** from the KB metadata
+1. **Read kb_rules** from the validation response
 2. **Compare note content** against the rules
 3. **For updates**: Compare original and updated content to ensure no information loss
 4. **If issues found**: Call `update_note` with corrected content
@@ -246,7 +250,7 @@ When receiving a validation response, the LLM MUST:
 ```
 1. Receive response from create_note
    ↓
-2. Extract organization_rules:
+2. Extract kb_rules:
    - "Each note should have a summary section"
    - "Use [[wikilinks]] for related notes"
    ↓
@@ -332,4 +336,4 @@ When receiving a validation response, the LLM MUST:
 1. **Always Read Validation Response**: Don't skip the validation instructions
 2. **Fix Issues Immediately**: Address problems in the same conversation turn
 3. **Preserve Information**: For updates, always diff original and new content
-4. **Ask When Uncertain**: If organization_rules are ambiguous, clarify with user
+4. **Ask When Uncertain**: If kb_rules are ambiguous, clarify with user
